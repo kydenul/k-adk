@@ -1,0 +1,26 @@
+# Logger configuration under KLOG key
+KLOG:
+  prefix: "KADK_"
+  directory: "./logs"
+  filename: "KADK"
+  level: "debug"
+  format: "console" # "json"
+  time_layout: "2006-01-02 15:04:05.000"
+
+  # Basic settings
+  disable_caller: false
+  disable_stacktrace: false
+  disable_split_error: true
+
+  # File rotation
+  max_size: 100
+  max_backups: 5
+  compress: false
+
+  # Console output control
+  console_output: true
+
+  # Sampling (reduces log volume in high-traffic scenarios)
+  enable_sampling: true
+  sample_initial: 100
+  sample_thereafter: 1000
