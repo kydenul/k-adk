@@ -1,0 +1,41 @@
+# Logger configuration under KLOG key
+KLOG:
+  prefix: "KADK_"
+  directory: "./logs"
+  filename: "KADK"
+  level: "debug"
+  format: "console" # "json"
+  time_layout: "2006-01-02 15:04:05.000"
+
+  # Basic settings
+  disable_caller: false
+  disable_stacktrace: false
+  disable_split_error: true
+
+  # File rotation
+  max_size: 100
+  max_backups: 5
+  compress: false
+
+  # Console output control
+  console_output: true
+
+  # Sampling (reduces log volume in high-traffic scenarios)
+  enable_sampling: true
+  sample_initial: 100
+  sample_thereafter: 1000
+
+# Redis Config
+RedisProd:
+  host: "127.0.0.1"
+  port: 6379
+  password: ""
+  pool_size: 100
+  max_idle_conns: 30
+  min_idle_conns:  10
+  conn_max_idle_time: "2m"
+  conn_max_lifetime: "10m"
+  ping_retries: 3
+  ping_timeout: "5s"
+  enable_pool_monitor: true
+  pool_monitor_interval: "30s"

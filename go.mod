@@ -9,6 +9,7 @@ require (
 	github.com/openai/openai-go/v3 v3.17.0
 	github.com/redis/go-redis/v9 v9.17.3
 	github.com/spf13/cast v1.7.1
+	github.com/spf13/viper v1.20.1
 	google.golang.org/adk v0.4.0
 	google.golang.org/genai v1.40.0
 )
@@ -40,7 +41,6 @@ require (
 	github.com/sourcegraph/conc v0.3.0 // indirect
 	github.com/spf13/afero v1.12.0 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
-	github.com/spf13/viper v1.20.1 // indirect
 	github.com/subosito/gotenv v1.6.0 // indirect
 	github.com/tidwall/gjson v1.18.0 // indirect
 	github.com/tidwall/match v1.1.1 // indirect
