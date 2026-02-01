@@ -6,6 +6,7 @@ require (
 	github.com/anthropics/anthropic-sdk-go v1.20.0
 	github.com/bytedance/sonic v1.15.0
 	github.com/kydenul/log v1.6.0
+	github.com/lib/pq v1.11.1
 	github.com/openai/openai-go/v3 v3.17.0
 	github.com/redis/go-redis/v9 v9.17.3
 	github.com/spf13/cast v1.7.1
