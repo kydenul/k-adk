@@ -10,6 +10,7 @@ import (
 	"iter"
 	"sync"
 
+	discardlog "github.com/kydenul/k-adk/internal/discard_log"
 	"github.com/kydenul/log"
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
@@ -66,7 +67,7 @@ func New(config Config) *Model {
 	opts := make([]option.RequestOption, 0, 2)
 
 	if config.Logger == nil {
-		config.Logger = NewDiscardLog()
+		config.Logger = discardlog.NewDiscardLog()
 	}
 
 	if config.APIKey != "" {

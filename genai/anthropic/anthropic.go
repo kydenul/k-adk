@@ -10,6 +10,7 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
+	discardlog "github.com/kydenul/k-adk/internal/discard_log"
 	"github.com/kydenul/log"
 	"github.com/spf13/cast"
 	"google.golang.org/adk/model"
@@ -52,7 +53,7 @@ func New(config Config) *Model {
 	opts := make([]option.RequestOption, 0, 2)
 
 	if config.Logger == nil {
-		config.Logger = NewDiscardLog()
+		config.Logger = discardlog.NewDiscardLog()
 	}
 
 	if config.APIKey != "" {
