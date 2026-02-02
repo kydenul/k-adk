@@ -83,8 +83,8 @@ linters:
         - name: time-equal              # 建议使用 `time.Time.Equal` 比较时间
         - name: time-naming             # 检查 `time.Time` 命名规范
         - name: redefines-builtin-id    # 警告重新定义内置标识符
-        # - name: package-comments        # 强制包注释
-        - name: unused-receiver         # 检查未使用的接收器
+        # - name: package-comments
+        # - name: unused-receiver
         - name: bare-return             # 警告裸返回
         - name: defer                   # 检查 `defer` 语句
         - name: early-return            # 检查早期返回

@@ -44,6 +44,7 @@ Thumbs.db
 ehthumbs.db
 
 # Debug files
+logs/
 *.log
 debug.out
 

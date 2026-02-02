@@ -1,4 +1,4 @@
-package redis
+package session
 
 import (
 	"context"
@@ -10,6 +10,7 @@ import (
 	"github.com/kydenul/log"
 	"github.com/redis/go-redis/v9"
 	"github.com/spf13/cast"
+	"github.com/spf13/viper"
 )
 
 const (
@@ -238,4 +239,29 @@ func (c *RedisClient) runPoolMonitor(ctx context.Context, interval time.Duration
 				stats.TotalConns, stats.IdleConns, stats.StaleConns)
 		}
 	}
+}
+
+// "RedisProd"
+
+// LoadRedisConfigFromFile loads redis config from file.
+//
+//   - configFile: The path to the configuration file.
+//   - key: The key in the configuration file where the Redis configuration is located.
+//     Recommonded: `Test` / `Pre-Release` / `Production`
+func LoadRedisConfigFromFile(configFile, key string) *RedisConfig {
+	v := viper.New()
+	v.SetConfigFile(configFile)
+
+	if err := v.ReadInConfig(); err != nil {
+		log.Fatalf("Failed to read config file: %v", err)
+	}
+
+	redisConfig := &RedisConfig{}
+	if err := v.UnmarshalKey(key, redisConfig); err != nil {
+		log.Fatalf("Failed to unmarshal Redis config: %v", err)
+	}
+
+	log.Info(redisConfig)
+
+	return redisConfig
 }

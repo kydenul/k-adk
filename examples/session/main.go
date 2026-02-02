@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/kydenul/k-adk/genai/openai"
-	"github.com/kydenul/k-adk/session/redis"
+	ksess "github.com/kydenul/k-adk/session/redis"
 	"github.com/kydenul/log"
 	"github.com/spf13/viper"
 	"google.golang.org/adk/agent"
@@ -48,13 +48,13 @@ func main() {
 		Logger: logger,
 	})
 
-	rdb, err := redis.NewRedisClient(redisConfig())
+	rdb, err := ksess.NewRedisClient(redisConfig())
 	if err != nil {
 		log.Fatalf("Failed to create Redis client: %v", err)
 	}
 	defer func() { _ = rdb.Close() }()
 
-	sessSvr, err := redis.NewRedisSessionService(rdb, 24*time.Hour, logger)
+	sessSvr, err := ksess.NewRedisSessionService(rdb, 24*time.Hour, logger)
 	if err != nil {
 		log.Fatalf("Failed to create Redis session service: %v", err)
 	}
@@ -222,7 +222,7 @@ Be conversational and reference previous parts of the conversation when relevant
 	}
 }
 
-func redisConfig() *redis.RedisConfig {
+func redisConfig() *ksess.RedisConfig {
 	viper.AddConfigPath(".")
 	viper.SetConfigName("config")
 	viper.SetConfigType("yaml")
@@ -230,7 +230,7 @@ func redisConfig() *redis.RedisConfig {
 		log.Fatalf("Failed to read config file: %v", err)
 	}
 
-	redisConfig := &redis.RedisConfig{}
+	redisConfig := &ksess.RedisConfig{}
 	if err := viper.UnmarshalKey("RedisProd", redisConfig); err != nil {
 		log.Fatalf("Failed to unmarshal Redis config: %v", err)
 	}
