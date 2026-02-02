@@ -177,6 +177,9 @@ func (s *PostgresMemoryService) AddSession(ctx context.Context, sess session.Ses
 		return nil
 	}
 
+	s.logger.Debugf("adding session to memory: app=%s, user=%s, session=%s, events=%d",
+		sess.AppName(), sess.UserID(), sess.ID(), events.Len())
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		s.logger.Errorf("failed to begin transaction: %v", err)
@@ -198,7 +201,7 @@ func (s *PostgresMemoryService) AddSession(ctx context.Context, sess session.Ses
 		stmt, err = tx.PrepareContext(ctx, `
 			INSERT INTO memory_entries (app_name, user_id, session_id, event_id, author, content, content_text, timestamp)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-			ON CONFLICT (app_name, user_id, session_id, event_id) DO UPDATE 
+			ON CONFLICT (app_name, user_id, session_id, event_id) DO UPDATE
 			SET content = EXCLUDED.content, content_text = EXCLUDED.content_text
 		`)
 	}
@@ -209,20 +212,27 @@ func (s *PostgresMemoryService) AddSession(ctx context.Context, sess session.Ses
 	}
 	defer func() { _ = stmt.Close() }()
 
+	insertedCount := 0
+	skippedCount := 0
+	errorCount := 0
+
 	for event := range events.All() {
 		if event.Content == nil || len(event.Content.Parts) == 0 {
+			skippedCount++
 			continue
 		}
 
 		// Extract text content
 		text := extractTextFromContent(event.Content)
 		if text == "" {
+			skippedCount++
 			continue
 		}
 
 		// Serialize content to JSON
 		contentJSON, err := sonic.Marshal(event.Content)
 		if err != nil {
+			errorCount++
 			continue
 		}
 
@@ -243,6 +253,8 @@ func (s *PostgresMemoryService) AddSession(ctx context.Context, sess session.Ses
 			if embErr == nil && len(embedding) > 0 {
 				embStr := vectorToString(embedding)
 				embeddingStr = &embStr
+			} else if embErr != nil {
+				s.logger.Debugf("failed to generate embedding for event %s: %v", eventID, embErr)
 			}
 
 			_, err = stmt.ExecContext(ctx,
@@ -271,11 +283,21 @@ func (s *PostgresMemoryService) AddSession(ctx context.Context, sess session.Ses
 		if err != nil {
 			// Log but continue with other events
 			s.logger.Errorf("failed to insert memory entry: %v", err)
+			errorCount++
 			continue
 		}
+		insertedCount++
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		s.logger.Errorf("failed to commit transaction: %v", err)
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	s.logger.Infof("session added to memory: session=%s, inserted=%d, skipped=%d, errors=%d",
+		sess.ID(), insertedCount, skippedCount, errorCount)
+
+	return nil
 }
 
 // Close closes the database connection.
@@ -289,9 +311,13 @@ func (s *PostgresMemoryService) Search(
 	ctx context.Context,
 	req *memory.SearchRequest,
 ) (*memory.SearchResponse, error) {
+	s.logger.Debugf("searching memories: app=%s, user=%s, query=%q",
+		req.AppName, req.UserID, req.Query)
+
 	var (
-		memories []memory.Entry
-		err      error
+		memories   []memory.Entry
+		err        error
+		searchType string
 	)
 
 	// NOTE: If we have an embedding model and a query, try vector search first
@@ -303,6 +329,7 @@ func (s *PostgresMemoryService) Search(
 				s.logger.Errorf("failed to search by vector: %v", err)
 				return nil, err
 			}
+			searchType = "vector"
 		}
 	}
 
@@ -313,6 +340,7 @@ func (s *PostgresMemoryService) Search(
 			s.logger.Errorf("failed to search by text: %v", err)
 			return nil, err
 		}
+		searchType = "text"
 	}
 
 	// NOTE: If still no results and query is empty, return recent entries
@@ -322,7 +350,10 @@ func (s *PostgresMemoryService) Search(
 			s.logger.Errorf("failed to search recent: %v", err)
 			return nil, err
 		}
+		searchType = "recent"
 	}
+
+	s.logger.Debugf("search completed: type=%s, results=%d", searchType, len(memories))
 
 	return &memory.SearchResponse{Memories: memories}, nil
 }
@@ -333,6 +364,9 @@ func (s *PostgresMemoryService) searchByVector(
 	req *memory.SearchRequest,
 	embedding []float32,
 ) ([]memory.Entry, error) {
+	s.logger.Debugf("searching by vector: app=%s, user=%s, embedding_dim=%d",
+		req.AppName, req.UserID, len(embedding))
+
 	query := `
 		SELECT content, author, timestamp
 		FROM memory_entries
@@ -357,10 +391,13 @@ func (s *PostgresMemoryService) searchByText(
 	ctx context.Context,
 	req *memory.SearchRequest,
 ) ([]memory.Entry, error) {
+	s.logger.Debugf("searching by text: app=%s, user=%s, query=%q",
+		req.AppName, req.UserID, req.Query)
+
 	query := `
 		SELECT content, author, timestamp
 		FROM memory_entries
-		WHERE app_name = $1 AND user_id = $2 
+		WHERE app_name = $1 AND user_id = $2
 		AND to_tsvector('english', content_text) @@ plainto_tsquery('english', $3)
 		ORDER BY ts_rank(to_tsvector('english', content_text), plainto_tsquery('english', $3)) DESC,
 		         timestamp DESC
@@ -381,6 +418,8 @@ func (s *PostgresMemoryService) searchRecent(
 	ctx context.Context,
 	req *memory.SearchRequest,
 ) ([]memory.Entry, error) {
+	s.logger.Debugf("searching recent entries: app=%s, user=%s", req.AppName, req.UserID)
+
 	query := `
 		SELECT content, author, timestamp
 		FROM memory_entries
@@ -391,6 +430,7 @@ func (s *PostgresMemoryService) searchRecent(
 
 	rows, err := s.db.QueryContext(ctx, query, req.AppName, req.UserID)
 	if err != nil {
+		s.logger.Errorf("failed to search recent: %v", err)
 		return nil, fmt.Errorf("failed to search recent: %w", err)
 	}
 	defer func() { _ = rows.Close() }()

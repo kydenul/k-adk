@@ -47,7 +47,7 @@ func TestEmbedSuccess(t *testing.T) {
 	}))
 	defer server.Close()
 
-	emb := NewOpenAICompatibleEmbedding(Config{
+	emb := NewOpenAICompatibleEmbedding(EmbeddingConfig{
 		BaseURL:    server.URL,
 		Model:      "test-model",
 		HTTPClient: server.Client(),
@@ -91,7 +91,7 @@ func TestEmbedWithAPIKey(t *testing.T) {
 	}))
 	defer server.Close()
 
-	emb := NewOpenAICompatibleEmbedding(Config{
+	emb := NewOpenAICompatibleEmbedding(EmbeddingConfig{
 		BaseURL:    server.URL,
 		APIKey:     expectedAPIKey,
 		Model:      "test-model",
@@ -123,7 +123,7 @@ func TestEmbedWithoutAPIKey(t *testing.T) {
 	}))
 	defer server.Close()
 
-	emb := NewOpenAICompatibleEmbedding(Config{
+	emb := NewOpenAICompatibleEmbedding(EmbeddingConfig{
 		BaseURL:    server.URL,
 		Model:      "test-model",
 		HTTPClient: server.Client(),
@@ -149,7 +149,7 @@ func TestEmbedAutoDimension(t *testing.T) {
 	}))
 	defer server.Close()
 
-	emb := NewOpenAICompatibleEmbedding(Config{
+	emb := NewOpenAICompatibleEmbedding(EmbeddingConfig{
 		BaseURL:    server.URL,
 		Model:      "test-model",
 		HTTPClient: server.Client(),
@@ -189,7 +189,7 @@ func TestEmbedPresetDimension(t *testing.T) {
 	}))
 	defer server.Close()
 
-	emb := NewOpenAICompatibleEmbedding(Config{
+	emb := NewOpenAICompatibleEmbedding(EmbeddingConfig{
 		BaseURL:    server.URL,
 		Model:      "test-model",
 		Dimension:  1536, // Preset dimension
@@ -211,7 +211,7 @@ func TestEmbedServerError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	emb := NewOpenAICompatibleEmbedding(Config{
+	emb := NewOpenAICompatibleEmbedding(EmbeddingConfig{
 		BaseURL:    server.URL,
 		Model:      "test-model",
 		HTTPClient: server.Client(),
@@ -234,7 +234,7 @@ func TestEmbedEmptyResponse(t *testing.T) {
 	}))
 	defer server.Close()
 
-	emb := NewOpenAICompatibleEmbedding(Config{
+	emb := NewOpenAICompatibleEmbedding(EmbeddingConfig{
 		BaseURL:    server.URL,
 		Model:      "test-model",
 		HTTPClient: server.Client(),
@@ -254,7 +254,7 @@ func TestEmbedInvalidJSON(t *testing.T) {
 	}))
 	defer server.Close()
 
-	emb := NewOpenAICompatibleEmbedding(Config{
+	emb := NewOpenAICompatibleEmbedding(EmbeddingConfig{
 		BaseURL:    server.URL,
 		Model:      "test-model",
 		HTTPClient: server.Client(),
@@ -275,7 +275,7 @@ func TestEmbedContextCancellation(t *testing.T) {
 	}))
 	defer server.Close()
 
-	emb := NewOpenAICompatibleEmbedding(Config{
+	emb := NewOpenAICompatibleEmbedding(EmbeddingConfig{
 		BaseURL:    server.URL,
 		Model:      "test-model",
 		HTTPClient: server.Client(),
@@ -308,7 +308,7 @@ func TestEmbedBaseURLTrailingSlash(t *testing.T) {
 	defer server.Close()
 
 	// Test with trailing slash in BaseURL
-	emb := NewOpenAICompatibleEmbedding(Config{
+	emb := NewOpenAICompatibleEmbedding(EmbeddingConfig{
 		BaseURL:    server.URL + "/", // Trailing slash
 		Model:      "test-model",
 		HTTPClient: server.Client(),

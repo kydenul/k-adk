@@ -100,6 +100,9 @@ func (s *RedisSessionService) Create(
 		sessionID = generateSessionID()
 	}
 
+	s.logger.Debugf("creating session: app=%s, user=%s, session=%s",
+		req.AppName, req.UserID, sessionID)
+
 	key := buildSessionKey(req.AppName, req.UserID, sessionID)
 	evKey := buildEventsKey(req.AppName, req.UserID, sessionID)
 
@@ -114,22 +117,28 @@ func (s *RedisSessionService) Create(
 
 	data, err := sonic.Marshal(sess.toStorable())
 	if err != nil {
+		s.logger.Errorf("failed to marshal session %s: %v", sessionID, err)
 		return nil, fmt.Errorf("failed to marshal session: %w", err)
 	}
 
 	if err := s.rdb.Set(ctx, key, data, s.ttl).Err(); err != nil {
+		s.logger.Errorf("failed to set session %s in redis: %v", sessionID, err)
 		return nil, fmt.Errorf("failed to set session: %w", err)
 	}
 
 	// Add to session index
 	indexKey := buildSessionIndexKey(req.AppName, req.UserID)
 	if err := s.rdb.SAdd(ctx, indexKey, sessionID).Err(); err != nil {
+		s.logger.Errorf("failed to add session %s to index: %v", sessionID, err)
 		return nil, fmt.Errorf("failed to add session to index: %w", err)
 	}
 
 	if err := s.rdb.Expire(ctx, indexKey, s.ttl).Err(); err != nil {
 		s.logger.Warnf("failed to set expire for index key %s: %v", indexKey, err)
 	}
+
+	s.logger.Infof("session created: app=%s, user=%s, session=%s, ttl=%s",
+		req.AppName, req.UserID, sessionID, s.ttl)
 
 	return &session.CreateResponse{Session: sess}, nil
 }
@@ -139,18 +148,24 @@ func (s *RedisSessionService) Get(
 	ctx context.Context,
 	req *session.GetRequest,
 ) (*session.GetResponse, error) {
+	s.logger.Debugf("getting session: app=%s, user=%s, session=%s",
+		req.AppName, req.UserID, req.SessionID)
+
 	key := buildSessionKey(req.AppName, req.UserID, req.SessionID)
 
 	data, err := s.rdb.Get(ctx, key).Bytes()
 	if err != nil {
 		if errors.Is(err, redis.Nil) {
+			s.logger.Debugf("session not found: %s", req.SessionID)
 			return nil, fmt.Errorf("%w: %s", ErrSessionNotFound, req.SessionID)
 		}
+		s.logger.Errorf("failed to get session %s: %v", req.SessionID, err)
 		return nil, fmt.Errorf("failed to get session: %w", err)
 	}
 
 	var storable storableSession
 	if err := sonic.Unmarshal(data, &storable); err != nil {
+		s.logger.Errorf("failed to unmarshal session %s: %v", req.SessionID, err)
 		return nil, fmt.Errorf("failed to unmarshal session: %w", err)
 	}
 
@@ -158,6 +173,7 @@ func (s *RedisSessionService) Get(
 	evKey := buildEventsKey(req.AppName, req.UserID, req.SessionID)
 	eventData, err := s.rdb.LRange(ctx, evKey, 0, -1).Result()
 	if err != nil && !errors.Is(err, redis.Nil) {
+		s.logger.Errorf("failed to get events for session %s: %v", req.SessionID, err)
 		return nil, fmt.Errorf("failed to get events: %w", err)
 	}
 
@@ -202,6 +218,8 @@ func (s *RedisSessionService) Get(
 		lastUpdateTime: storable.LastUpdateTime,
 	}
 
+	s.logger.Debugf("session retrieved: session=%s, events=%d", req.SessionID, len(events))
+
 	return &session.GetResponse{Session: sess}, nil
 }
 
@@ -210,14 +228,18 @@ func (s *RedisSessionService) List(
 	ctx context.Context,
 	req *session.ListRequest,
 ) (*session.ListResponse, error) {
+	s.logger.Debugf("listing sessions: app=%s, user=%s", req.AppName, req.UserID)
+
 	indexKey := buildSessionIndexKey(req.AppName, req.UserID)
 
 	sessionIDs, err := s.rdb.SMembers(ctx, indexKey).Result()
 	if err != nil {
+		s.logger.Errorf("failed to list sessions for user %s: %v", req.UserID, err)
 		return nil, fmt.Errorf("failed to list sessions: %w", err)
 	}
 
 	if len(sessionIDs) == 0 {
+		s.logger.Debugf("no sessions found for user %s", req.UserID)
 		return &session.ListResponse{Sessions: nil}, nil
 	}
 
@@ -230,6 +252,7 @@ func (s *RedisSessionService) List(
 	}
 
 	if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
+		s.logger.Errorf("failed to batch get sessions: %v", err)
 		return nil, fmt.Errorf("failed to batch get sessions: %w", err)
 	}
 
@@ -267,11 +290,16 @@ func (s *RedisSessionService) List(
 		sessions = append(sessions, sess)
 	}
 
+	s.logger.Debugf("listed %d sessions for user %s", len(sessions), req.UserID)
+
 	return &session.ListResponse{Sessions: sessions}, nil
 }
 
 // Delete removes a session.
 func (s *RedisSessionService) Delete(ctx context.Context, req *session.DeleteRequest) error {
+	s.logger.Debugf("deleting session: app=%s, user=%s, session=%s",
+		req.AppName, req.UserID, req.SessionID)
+
 	key := buildSessionKey(req.AppName, req.UserID, req.SessionID)
 	evKey := buildEventsKey(req.AppName, req.UserID, req.SessionID)
 	indexKey := buildSessionIndexKey(req.AppName, req.UserID)
@@ -282,8 +310,12 @@ func (s *RedisSessionService) Delete(ctx context.Context, req *session.DeleteReq
 	pipe.SRem(ctx, indexKey, req.SessionID)
 
 	if _, err := pipe.Exec(ctx); err != nil {
+		s.logger.Errorf("failed to delete session %s: %v", req.SessionID, err)
 		return fmt.Errorf("failed to delete session: %w", err)
 	}
+
+	s.logger.Infof("session deleted: app=%s, user=%s, session=%s",
+		req.AppName, req.UserID, req.SessionID)
 
 	return nil
 }
@@ -303,13 +335,18 @@ func (s *RedisSessionService) AppendEvent(
 		evt.ID = generateSessionID()
 	}
 
+	s.logger.Debugf("appending event to session %s: event_id=%s, author=%s",
+		sess.ID(), evt.ID, evt.Author)
+
 	data, err := sonic.Marshal(evt)
 	if err != nil {
+		s.logger.Errorf("failed to marshal event %s: %v", evt.ID, err)
 		return fmt.Errorf("failed to marshal event: %w", err)
 	}
 
 	evKey := buildEventsKey(sess.AppName(), sess.UserID(), sess.ID())
 	if err := s.rdb.RPush(ctx, evKey, data).Err(); err != nil {
+		s.logger.Errorf("failed to append event %s to session %s: %v", evt.ID, sess.ID(), err)
 		return fmt.Errorf("failed to append event: %w", err)
 	}
 
@@ -321,11 +358,13 @@ func (s *RedisSessionService) AppendEvent(
 	key := buildSessionKey(sess.AppName(), sess.UserID(), sess.ID())
 	sessData, err := s.rdb.Get(ctx, key).Bytes()
 	if err != nil {
+		s.logger.Errorf("failed to get session %s for update: %v", sess.ID(), err)
 		return fmt.Errorf("failed to get session for update: %w", err)
 	}
 
 	var storable storableSession
 	if err := sonic.Unmarshal(sessData, &storable); err != nil {
+		s.logger.Errorf("failed to unmarshal session %s: %v", sess.ID(), err)
 		return fmt.Errorf("failed to unmarshal session: %w", err)
 	}
 
@@ -338,12 +377,16 @@ func (s *RedisSessionService) AppendEvent(
 	storable.LastUpdateTime = time.Now()
 	updatedData, err := sonic.Marshal(storable)
 	if err != nil {
+		s.logger.Errorf("failed to marshal updated session %s: %v", sess.ID(), err)
 		return fmt.Errorf("failed to marshal updated session: %w", err)
 	}
 
 	if err := s.rdb.Set(ctx, key, updatedData, s.ttl).Err(); err != nil {
+		s.logger.Errorf("failed to update session %s: %v", sess.ID(), err)
 		return fmt.Errorf("failed to update session: %w", err)
 	}
+
+	s.logger.Debugf("event appended: session=%s, event=%s", sess.ID(), evt.ID)
 
 	return nil
 }
