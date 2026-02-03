@@ -106,20 +106,6 @@ type RedisClient struct {
 	logger        log.Logger
 }
 
-// Close closes the Redis client and stops the pool monitor if running.
-func (c *RedisClient) Close() error {
-	if c.cancelMonitor != nil {
-		c.cancelMonitor()
-		c.cancelMonitor = nil
-	}
-
-	if c.UniversalClient == nil {
-		return nil
-	}
-
-	return c.UniversalClient.Close()
-}
-
 // NewRedisClient creates a new Redis client with the given configuration.
 // The caller is responsible for closing the client when done.
 //
@@ -218,6 +204,24 @@ func NewRedisClient(cfg *RedisConfig) (*RedisClient, error) {
 	}
 
 	return client, nil
+}
+
+// Client returns the underlying Redis client.
+// The returned client shares the same connection pool and should not be closed separately.
+func (c *RedisClient) Client() redis.UniversalClient { return c.UniversalClient }
+
+// Close closes the Redis client and stops the pool monitor if running.
+func (c *RedisClient) Close() error {
+	if c.cancelMonitor != nil {
+		c.cancelMonitor()
+		c.cancelMonitor = nil
+	}
+
+	if c.UniversalClient == nil {
+		return nil
+	}
+
+	return c.UniversalClient.Close()
 }
 
 // runPoolMonitor logs pool statistics at the specified interval.
