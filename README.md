@@ -10,6 +10,7 @@ K-ADK is a Go library that provides adapter implementations for integrating [Goo
 - **OpenAI Adapter** - Full support for OpenAI API and compatible providers (Ollama, vLLM, OpenRouter, etc.)
 - **Anthropic Adapter** - Native Claude API support with automatic message history repair
 - **Redis Session Service** - Persistent session management with Redis backend
+- **PostgreSQL Session Persister** - Hybrid Redis + PostgreSQL session persistence for durability
 - **PostgreSQL Memory Service** - Long-term memory storage with pgvector semantic search
 - **Streaming Support** - Real-time streaming responses via Go 1.23+ iterators
 - **Tool Calling** - Full function/tool calling support with automatic ID normalization
@@ -147,6 +148,55 @@ runner, _ := runner.New(runner.Config{
 })
 ```
 
+### PostgreSQL Session Persister (Hybrid Storage)
+
+For production deployments requiring data durability, use the hybrid Redis + PostgreSQL architecture. Redis serves as the fast primary cache while PostgreSQL provides long-term persistence:
+
+```go
+import (
+    ksess "github.com/kydenul/k-adk/session/redis"
+    pg "github.com/kydenul/k-adk/session/postgres"
+    "time"
+)
+
+// Create PostgreSQL client
+pgClient, _ := pg.NewClient(ctx, &pg.Config{
+    ConnStr:      "postgres://user:pass@localhost:5432/dbname?sslmode=disable",
+    MaxOpenConns: 25,
+    MaxIdleConns: 10,
+    ShardCount:   8, // Events are sharded across tables for scalability
+})
+
+// Create session persister (handles async persistence)
+pgPersister, _ := pg.NewSessionPersister(ctx, pgClient)
+
+// Create Redis client
+rdb, _ := ksess.NewRedisClient(&ksess.RedisConfig{
+    Addr: "localhost:6379",
+})
+
+// Create hybrid session service
+sessionSrv, _ := ksess.NewRedisSessionService(
+    rdb,
+    10*time.Minute, // Redis TTL
+    logger,
+    ksess.WithPersister(pgPersister), // Enable PostgreSQL persistence
+)
+
+// Use with ADK runner - sessions automatically sync to PostgreSQL
+runner, _ := runner.New(runner.Config{
+    AppName:        "myapp",
+    Agent:          agent,
+    SessionService: sessionSrv,
+})
+```
+
+**Key Features:**
+- **Async Persistence**: Events are queued and persisted asynchronously (configurable buffer size)
+- **Sharded Events**: Events table is sharded by user_id hash for horizontal scalability
+- **Automatic Schema**: Tables and indexes are created automatically on startup
+- **Graceful Fallback**: If async queue is full, falls back to synchronous persistence
+
 ### PostgreSQL Memory Service
 
 Long-term memory with semantic search using pgvector:
@@ -185,10 +235,40 @@ google.golang.org/adk/model.LLM (interface)
 google.golang.org/adk/session.Service (interface)
            │
            └── session/redis/   → Uses github.com/redis/go-redis/v9
+                    │
+                    └── (optional) session/postgres/ → Long-term persistence
 
 google.golang.org/adk/memory.Service (interface)
            │
            └── memory/postgres/ → Uses github.com/lib/pq + pgvector
+```
+
+### Hybrid Session Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      ADK Runner                             │
+└─────────────────────────┬───────────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────────┐
+│              RedisSessionService                            │
+│  ┌─────────────────┐    ┌─────────────────────────────┐    │
+│  │  Redis Client   │    │  Persister (optional)       │    │
+│  │  (Primary)      │───▶│  PostgreSQL SessionPersister│    │
+│  │  - Fast R/W     │    │  - Async queue (1000 ops)   │    │
+│  │  - TTL-based    │    │  - Sharded events tables    │    │
+│  └─────────────────┘    └─────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────┘
+                          │
+          ┌───────────────┴───────────────┐
+          ▼                               ▼
+┌─────────────────────┐       ┌─────────────────────┐
+│       Redis         │       │     PostgreSQL      │
+│  - Session cache    │       │  - sessions table   │
+│  - Events list      │       │  - session_events_N │
+│  - Auto-expire      │       │  (N = shard count)  │
+└─────────────────────┘       └─────────────────────┘
 ```
 
 ### Key Implementation Details
@@ -211,11 +291,15 @@ k-adk/
 │       ├── anthropic.go  # Main adapter (model.LLM interface)
 │       └── base.go       # Conversion utilities
 ├── session/
-│   └── redis/            # Redis session service
-│       ├── service.go    # session.Service implementation
-│       ├── session.go    # Session struct
-│       ├── state.go      # State management
-│       └── events.go     # Event handling
+│   ├── persister.go      # Persister interface for long-term storage
+│   ├── redis/            # Redis session service
+│   │   ├── service.go    # session.Service implementation
+│   │   ├── session.go    # Session struct
+│   │   ├── state.go      # State management
+│   │   └── events.go     # Event handling
+│   └── postgres/         # PostgreSQL session persister
+│       ├── client.go     # PostgreSQL client with connection pool
+│       └── persister.go  # Async session/event persistence
 ├── memory/
 │   └── postgres/         # PostgreSQL memory service
 │       ├── memory.go     # memory.Service implementation
@@ -225,6 +309,7 @@ k-adk/
 └── examples/
     ├── openai-cli/       # CLI example with OpenAI
     ├── session/          # Redis session example
+    ├── persist/          # Redis + PostgreSQL hybrid persistence demo
     ├── web/              # Multi-agent web example
     └── gin/              # Gin REST API server (ADK-compatible)
 ```
@@ -256,6 +341,24 @@ k-adk/
 | `Addr` | string | Redis address (e.g., "localhost:6379") |
 | `Password` | string | Redis password |
 | `DB` | int | Redis database number |
+
+### PostgreSQL Session Persister Config
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ConnStr` | string | PostgreSQL connection string |
+| `MaxOpenConns` | int | Maximum open connections (default: 25) |
+| `MaxIdleConns` | int | Maximum idle connections (default: 10) |
+| `ConnMaxIdleTime` | duration | Max idle time per connection (default: 10m) |
+| `ConnMaxLifetime` | duration | Max lifetime per connection (default: 30m) |
+| `ShardCount` | int | Number of event table shards, must be power of 2 (default: 8) |
+| `Logger` | log.Logger | Optional logger instance |
+
+**Persister Options:**
+
+| Option | Description |
+|--------|-------------|
+| `WithAsyncBufferSize(n)` | Set async queue size (default: 1000, set 0 for sync mode) |
 
 ## Build Commands
 
@@ -298,6 +401,23 @@ export GOOGLE_API_KEY="your-key"
 # Configure Redis in config.yaml
 go run main.go web --port 8080
 ```
+
+### Hybrid Persistence Example
+
+Demonstrates Redis + PostgreSQL hybrid session storage with automatic persistence:
+
+```bash
+cd examples/persist
+# Configure Redis and PostgreSQL in config.yaml
+go run main.go demo   # Run persistence validation demo
+go run main.go serve  # Start web server with hybrid storage
+```
+
+The demo mode validates:
+- Session creation and event persistence
+- Data verification in both Redis and PostgreSQL
+- Simulated Redis expiration with PostgreSQL data survival
+- Multiple session handling
 
 ### Gin REST API Example
 
@@ -345,6 +465,7 @@ curl -X POST http://localhost:8080/run \
 
 - Go 1.25+
 - For Redis session: Redis server
+- For PostgreSQL session persister: PostgreSQL 12+
 - For PostgreSQL memory: PostgreSQL with pgvector extension
 
 ## Dependencies
