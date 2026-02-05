@@ -24,7 +24,7 @@ import (
 	"google.golang.org/genai"
 
 	"github.com/kydenul/k-adk/examples/web/agents"
-	ksess "github.com/kydenul/k-adk/session/redis"
+	rsess "github.com/kydenul/k-adk/session/redis"
 )
 
 // TTL defines the session expiration time in Redis.
@@ -46,7 +46,7 @@ func init() {
 // redisConfig loads Redis configuration from config.yaml using viper.
 // It reads the "RedisProd" section and returns the parsed RedisConfig.
 // Fatally exits if configuration loading fails.
-func redisConfig() *ksess.RedisConfig {
+func redisConfig() *rsess.RedisConfig {
 	viper.AddConfigPath(".")
 	viper.SetConfigName("config")
 	viper.SetConfigType("yaml")
@@ -54,7 +54,7 @@ func redisConfig() *ksess.RedisConfig {
 		log.Fatalf("Failed to read config file: %v", err)
 	}
 
-	redisConfig := &ksess.RedisConfig{}
+	redisConfig := &rsess.RedisConfig{}
 	if err := viper.UnmarshalKey("RedisProd", redisConfig); err != nil {
 		log.Fatalf("Failed to unmarshal Redis config: %v", err)
 	}
@@ -101,13 +101,13 @@ func main() {
 	}
 
 	// Set up Redis client for session persistence
-	rdb, err := ksess.NewRedisClient(redisConfig())
+	rdb, err := rsess.NewRedisClient(redisConfig())
 	if err != nil {
 		log.Fatalf("Failed to create redis client: %v", err)
 	}
 
 	// Create Redis-backed session service with TTL expiration
-	sessRedisService, err := ksess.NewRedisSessionService(rdb, TTL, logger)
+	sessRedisService, err := rsess.NewRedisSessionService(rdb, TTL, logger)
 	if err != nil {
 		log.Fatalf("Failed to create session redis service: %v", sessRedisService)
 	}
