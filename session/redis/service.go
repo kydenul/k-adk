@@ -1,4 +1,4 @@
-package session
+package redis
 
 import (
 	"context"
@@ -11,6 +11,7 @@ import (
 
 	"github.com/bytedance/sonic"
 	discardlog "github.com/kydenul/k-adk/internal/discard_log"
+	ksess "github.com/kydenul/k-adk/session"
 	"github.com/kydenul/log"
 	"github.com/redis/go-redis/v9"
 	"github.com/spf13/cast"
@@ -33,11 +34,23 @@ var (
 
 // RedisSessionService implements session.Service with Redis as the backend.
 type RedisSessionService struct {
-	rdb    redis.UniversalClient
-	logger log.Logger
+	rdb       redis.UniversalClient
+	logger    log.Logger
+	persister ksess.Persister // Optional PostgreSQL persister for long-term storage
 
 	// ttl is the session expiration time (default: 24 hours).
 	ttl time.Duration
+}
+
+// ServiceOption configures the RedisSessionService.
+type ServiceOption func(*RedisSessionService)
+
+// WithPersister sets the optional persister for long-term session storage.
+// When set, all session operations will be automatically synced to the persister.
+func WithPersister(p ksess.Persister) ServiceOption {
+	return func(s *RedisSessionService) {
+		s.persister = p
+	}
 }
 
 // NewRedisSessionService creates a new RedisSessionService.
@@ -48,6 +61,7 @@ func NewRedisSessionService(
 	rdb redis.UniversalClient,
 	ttl time.Duration,
 	logger log.Logger,
+	opts ...ServiceOption,
 ) (*RedisSessionService, error) {
 	if rdb == nil {
 		return nil, ErrNilRedisClient
@@ -61,11 +75,22 @@ func NewRedisSessionService(
 		logger = &discardlog.DiscardLog{}
 	}
 
-	return &RedisSessionService{
+	svc := &RedisSessionService{
 		rdb:    rdb,
 		ttl:    ttl,
 		logger: logger,
-	}, nil
+	}
+
+	// Apply options
+	for _, opt := range opts {
+		opt(svc)
+	}
+
+	if svc.persister != nil {
+		logger.Info("PostgreSQL persister enabled for long-term session storage")
+	}
+
+	return svc, nil
 }
 
 func buildSessionKey(appName, userID, sessionID string) string {
@@ -126,6 +151,8 @@ func (s *RedisSessionService) Create(
 		return nil, fmt.Errorf("failed to set session: %w", err)
 	}
 
+	s.logger.Debugf("session stored in redis: key=%s, ttl=%s", key, s.ttl)
+
 	// Add to session index
 	indexKey := buildSessionIndexKey(req.AppName, req.UserID)
 	if err := s.rdb.SAdd(ctx, indexKey, sessionID).Err(); err != nil {
@@ -135,6 +162,14 @@ func (s *RedisSessionService) Create(
 
 	if err := s.rdb.Expire(ctx, indexKey, s.ttl).Err(); err != nil {
 		s.logger.Warnf("failed to set expire for index key %s: %v", indexKey, err)
+	}
+
+	// Persist to PostgreSQL if persister is configured
+	if s.persister != nil {
+		if err := s.persister.PersistSession(ctx, sess); err != nil {
+			s.logger.Warnf("failed to persist session %s to postgres: %v", sessionID, err)
+			// Don't fail the request, Redis is the primary storage
+		}
 	}
 
 	s.logger.Infof("session created: app=%s, user=%s, session=%s, ttl=%s",
@@ -314,6 +349,15 @@ func (s *RedisSessionService) Delete(ctx context.Context, req *session.DeleteReq
 		return fmt.Errorf("failed to delete session: %w", err)
 	}
 
+	// Delete from PostgreSQL if persister is configured
+	if s.persister != nil {
+		err := s.persister.DeleteSession(ctx, req.AppName, req.UserID, req.SessionID)
+		if err != nil {
+			s.logger.Warnf("failed to delete session %s from postgres: %v", req.SessionID, err)
+			// Don't fail the request, Redis deletion succeeded
+		}
+	}
+
 	s.logger.Infof("session deleted: app=%s, user=%s, session=%s",
 		req.AppName, req.UserID, req.SessionID)
 
@@ -350,6 +394,8 @@ func (s *RedisSessionService) AppendEvent(
 		return fmt.Errorf("failed to append event: %w", err)
 	}
 
+	s.logger.Debugf("event stored in redis: key=%s, event_id=%s", evKey, evt.ID)
+
 	if err := s.rdb.Expire(ctx, evKey, s.ttl).Err(); err != nil {
 		s.logger.Warnf("failed to set expire for events key %s: %v", evKey, err)
 	}
@@ -384,6 +430,16 @@ func (s *RedisSessionService) AppendEvent(
 	if err := s.rdb.Set(ctx, key, updatedData, s.ttl).Err(); err != nil {
 		s.logger.Errorf("failed to update session %s: %v", sess.ID(), err)
 		return fmt.Errorf("failed to update session: %w", err)
+	}
+
+	s.logger.Debugf("session updated in redis: key=%s", key)
+
+	// Real-time sync to PostgreSQL if persister is configured (方案2)
+	if s.persister != nil {
+		if err := s.persister.PersistEvent(ctx, sess, evt); err != nil {
+			s.logger.Warnf("failed to persist event %s to postgres: %v", evt.ID, err)
+			// Don't fail the request, Redis is the primary storage
+		}
 	}
 
 	s.logger.Debugf("event appended: session=%s, event=%s", sess.ID(), evt.ID)
