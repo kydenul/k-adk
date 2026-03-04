@@ -20,9 +20,10 @@ import (
 
 var _ session.Service = (*RedisSessionService)(nil)
 
-// DefaultSessionTTL is the default session expiration time.
 const (
-	DefaultSessionTTL   = 24 * time.Hour
+	// defaultSessionTTL is the default session expiration time.
+	defaultSessionTTL = 24 * time.Hour
+	// sessionIDByteLength defines the length of the session ID in bytes.
 	sessionIDByteLength = 16
 )
 
@@ -34,10 +35,12 @@ var (
 
 // RedisSessionService implements session.Service with Redis as the backend.
 type RedisSessionService struct {
-	rdb       redis.UniversalClient
-	logger    log.Logger
-	persister ksess.Persister // Optional PostgreSQL persister for long-term storage
+	rdb redis.UniversalClient
 
+	// Optional.
+	logger log.Logger
+	// Optional. PostgreSQL persister for long-term storage
+	persister ksess.Persister
 	// ttl is the session expiration time (default: 24 hours).
 	ttl time.Duration
 }
@@ -48,9 +51,16 @@ type ServiceOption func(*RedisSessionService)
 // WithPersister sets the optional persister for long-term session storage.
 // When set, all session operations will be automatically synced to the persister.
 func WithPersister(p ksess.Persister) ServiceOption {
-	return func(s *RedisSessionService) {
-		s.persister = p
-	}
+	return func(s *RedisSessionService) { s.persister = p }
+}
+
+// WithLogger sets the optional logger for the RedisSessionService.
+func WithLogger(logger log.Logger) ServiceOption {
+	return func(s *RedisSessionService) { s.logger = logger }
+}
+
+func WithTTL(ttl time.Duration) ServiceOption {
+	return func(s *RedisSessionService) { s.ttl = ttl }
 }
 
 // NewRedisSessionService creates a new RedisSessionService.
@@ -59,35 +69,29 @@ func WithPersister(p ksess.Persister) ServiceOption {
 // Returns an error if rdb is nil.
 func NewRedisSessionService(
 	rdb redis.UniversalClient,
-	ttl time.Duration,
-	logger log.Logger,
 	opts ...ServiceOption,
 ) (*RedisSessionService, error) {
 	if rdb == nil {
 		return nil, ErrNilRedisClient
 	}
 
-	if ttl <= 0 {
-		ttl = DefaultSessionTTL
-	}
-
-	if logger == nil {
-		logger = &discardlog.DiscardLog{}
-	}
-
-	svc := &RedisSessionService{
-		rdb:    rdb,
-		ttl:    ttl,
-		logger: logger,
-	}
+	svc := &RedisSessionService{rdb: rdb}
 
 	// Apply options
 	for _, opt := range opts {
 		opt(svc)
 	}
 
+	// Check
+	if svc.ttl <= 0 {
+		svc.ttl = defaultSessionTTL
+	}
+	if svc.logger == nil {
+		svc.logger = &discardlog.DiscardLog{}
+	}
+
 	if svc.persister != nil {
-		logger.Info("PostgreSQL persister enabled for long-term session storage")
+		svc.logger.Info("PostgreSQL persister enabled for long-term session storage")
 	}
 
 	return svc, nil
@@ -108,10 +112,12 @@ func buildEventsKey(appName, userID, sessionID string) string {
 // generateSessionID generates a unique session ID using crypto/rand.
 func generateSessionID() string {
 	b := make([]byte, sessionIDByteLength)
+
 	if _, err := rand.Read(b); err != nil {
 		// Fallback to timestamp if crypto/rand fails
 		return cast.ToString(time.Now().UnixNano())
 	}
+
 	return hex.EncodeToString(b)
 }
 
@@ -120,6 +126,7 @@ func (s *RedisSessionService) Create(
 	ctx context.Context,
 	req *session.CreateRequest,
 ) (*session.CreateResponse, error) {
+	// NOTE: build redis session
 	sessionID := req.SessionID
 	if sessionID == "" {
 		sessionID = generateSessionID()
@@ -140,6 +147,7 @@ func (s *RedisSessionService) Create(
 		lastUpdateTime: time.Now(),
 	}
 
+	// NOTE: Marshal and Set session to redis
 	data, err := sonic.Marshal(sess.toStorable())
 	if err != nil {
 		s.logger.Errorf("failed to marshal session %s: %v", sessionID, err)
@@ -151,9 +159,9 @@ func (s *RedisSessionService) Create(
 		return nil, fmt.Errorf("failed to set session: %w", err)
 	}
 
-	s.logger.Debugf("session stored in redis: key=%s, ttl=%s", key, s.ttl)
+	s.logger.Infof("session stored in redis success: key=%s, ttl=%s, data=%s", key, s.ttl, data)
 
-	// Add to session index
+	// NOTE: Add to session index
 	indexKey := buildSessionIndexKey(req.AppName, req.UserID)
 	if err := s.rdb.SAdd(ctx, indexKey, sessionID).Err(); err != nil {
 		s.logger.Errorf("failed to add session %s to index: %v", sessionID, err)
@@ -164,16 +172,17 @@ func (s *RedisSessionService) Create(
 		s.logger.Warnf("failed to set expire for index key %s: %v", indexKey, err)
 	}
 
-	// Persist to PostgreSQL if persister is configured
+	log.Infof("session added to index success: key=%s, session=%s", indexKey, sessionID)
+
+	// NOTE: Persist to PostgreSQL if persister is configured
 	if s.persister != nil {
 		if err := s.persister.PersistSession(ctx, sess); err != nil {
 			s.logger.Warnf("failed to persist session %s to postgres: %v", sessionID, err)
 			// Don't fail the request, Redis is the primary storage
 		}
-	}
 
-	s.logger.Infof("session created: app=%s, user=%s, session=%s, ttl=%s",
-		req.AppName, req.UserID, sessionID, s.ttl)
+		s.logger.Infof("session persisted to postgres success")
+	}
 
 	return &session.CreateResponse{Session: sess}, nil
 }
@@ -186,25 +195,30 @@ func (s *RedisSessionService) Get(
 	s.logger.Debugf("getting session: app=%s, user=%s, session=%s",
 		req.AppName, req.UserID, req.SessionID)
 
+	// NOTE: Get session from redis
 	key := buildSessionKey(req.AppName, req.UserID, req.SessionID)
 
 	data, err := s.rdb.Get(ctx, key).Bytes()
 	if err != nil {
 		if errors.Is(err, redis.Nil) {
-			s.logger.Debugf("session not found: %s", req.SessionID)
+			s.logger.Errorf("session not found: %s", req.SessionID)
 			return nil, fmt.Errorf("%w: %s", ErrSessionNotFound, req.SessionID)
 		}
+
 		s.logger.Errorf("failed to get session %s: %v", req.SessionID, err)
 		return nil, fmt.Errorf("failed to get session: %w", err)
 	}
 
+	s.logger.Debug("Loaded session from redis success")
+
+	// NOTE:
 	var storable storableSession
 	if err := sonic.Unmarshal(data, &storable); err != nil {
 		s.logger.Errorf("failed to unmarshal session %s: %v", req.SessionID, err)
 		return nil, fmt.Errorf("failed to unmarshal session: %w", err)
 	}
 
-	// Load events
+	// NOTE: Load events
 	evKey := buildEventsKey(req.AppName, req.UserID, req.SessionID)
 	eventData, err := s.rdb.LRange(ctx, evKey, 0, -1).Result()
 	if err != nil && !errors.Is(err, redis.Nil) {
@@ -217,8 +231,7 @@ func (s *RedisSessionService) Get(
 	for i, ed := range eventData {
 		var evt session.Event
 		if err := sonic.Unmarshal([]byte(ed), &evt); err != nil {
-			unmarshalErrors = append(unmarshalErrors,
-				fmt.Errorf("event at index %d: %w", i, err))
+			unmarshalErrors = append(unmarshalErrors, fmt.Errorf("event at index %d: %w", i, err))
 			continue
 		}
 		events = append(events, &evt)
@@ -244,6 +257,7 @@ func (s *RedisSessionService) Get(
 		events = filtered
 	}
 
+	// NOTE: build session
 	sess := &redisSession{
 		id:             storable.ID,
 		appName:        storable.AppName,
@@ -253,7 +267,7 @@ func (s *RedisSessionService) Get(
 		lastUpdateTime: storable.LastUpdateTime,
 	}
 
-	s.logger.Debugf("session retrieved: session=%s, events=%d", req.SessionID, len(events))
+	s.logger.Infof("session retrieved: session=%s, events=%d", req.SessionID, len(events))
 
 	return &session.GetResponse{Session: sess}, nil
 }
@@ -265,6 +279,7 @@ func (s *RedisSessionService) List(
 ) (*session.ListResponse, error) {
 	s.logger.Debugf("listing sessions: app=%s, user=%s", req.AppName, req.UserID)
 
+	// NOTE: List sessions
 	indexKey := buildSessionIndexKey(req.AppName, req.UserID)
 
 	sessionIDs, err := s.rdb.SMembers(ctx, indexKey).Result()
@@ -325,7 +340,7 @@ func (s *RedisSessionService) List(
 		sessions = append(sessions, sess)
 	}
 
-	s.logger.Debugf("listed %d sessions for user %s", len(sessions), req.UserID)
+	s.logger.Infof("listed %d sessions for user %s", len(sessions), req.UserID)
 
 	return &session.ListResponse{Sessions: sessions}, nil
 }
@@ -335,6 +350,7 @@ func (s *RedisSessionService) Delete(ctx context.Context, req *session.DeleteReq
 	s.logger.Debugf("deleting session: app=%s, user=%s, session=%s",
 		req.AppName, req.UserID, req.SessionID)
 
+	// NOTE: Delete session
 	key := buildSessionKey(req.AppName, req.UserID, req.SessionID)
 	evKey := buildEventsKey(req.AppName, req.UserID, req.SessionID)
 	indexKey := buildSessionIndexKey(req.AppName, req.UserID)
@@ -349,13 +365,15 @@ func (s *RedisSessionService) Delete(ctx context.Context, req *session.DeleteReq
 		return fmt.Errorf("failed to delete session: %w", err)
 	}
 
-	// Delete from PostgreSQL if persister is configured
+	// NOTE: Delete from PostgreSQL if persister is configured
 	if s.persister != nil {
 		err := s.persister.DeleteSession(ctx, req.AppName, req.UserID, req.SessionID)
 		if err != nil {
 			s.logger.Warnf("failed to delete session %s from postgres: %v", req.SessionID, err)
 			// Don't fail the request, Redis deletion succeeded
 		}
+
+		s.logger.Info("session deleted from postgres success")
 	}
 
 	s.logger.Infof("session deleted: app=%s, user=%s, session=%s",
@@ -394,13 +412,13 @@ func (s *RedisSessionService) AppendEvent(
 		return fmt.Errorf("failed to append event: %w", err)
 	}
 
-	s.logger.Debugf("event stored in redis: key=%s, event_id=%s", evKey, evt.ID)
+	s.logger.Infof("event stored in redis: key=%s, event_id=%s", evKey, evt.ID)
 
 	if err := s.rdb.Expire(ctx, evKey, s.ttl).Err(); err != nil {
 		s.logger.Warnf("failed to set expire for events key %s: %v", evKey, err)
 	}
 
-	// Update session's last update time and persist current state
+	// NOTE: Update session's last update time and persist current state
 	key := buildSessionKey(sess.AppName(), sess.UserID(), sess.ID())
 	sessData, err := s.rdb.Get(ctx, key).Bytes()
 	if err != nil {
@@ -434,15 +452,17 @@ func (s *RedisSessionService) AppendEvent(
 
 	s.logger.Debugf("session updated in redis: key=%s", key)
 
-	// Real-time sync to PostgreSQL if persister is configured (方案2)
+	// NOTE: Real-time sync to PostgreSQL if persister is configured
 	if s.persister != nil {
 		if err := s.persister.PersistEvent(ctx, sess, evt); err != nil {
 			s.logger.Warnf("failed to persist event %s to postgres: %v", evt.ID, err)
 			// Don't fail the request, Redis is the primary storage
 		}
+
+		s.logger.Info("event persisted to postgres success")
 	}
 
-	s.logger.Debugf("event appended: session=%s, event=%s", sess.ID(), evt.ID)
+	s.logger.Infof("event appended: session=%s, event=%s", sess.ID(), evt.ID)
 
 	return nil
 }
