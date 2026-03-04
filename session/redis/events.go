@@ -76,6 +76,7 @@ func (e *redisEvents) refreshCacheLocked(ctx context.Context) {
 	e.cached = events
 }
 
+// All returns an iterator over all cached events.
 func (e *redisEvents) All() iter.Seq[*session.Event] {
 	// Interface doesn't allow context parameter, use background context
 	e.mu.Lock()
@@ -95,14 +96,17 @@ func (e *redisEvents) All() iter.Seq[*session.Event] {
 }
 
 // Len returns the number of cached events.
+//
 // Note: Call All() first to ensure the cache is up-to-date.
 func (e *redisEvents) Len() int {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
+
 	return len(e.cached)
 }
 
 // At returns the event at the given index from the cache.
+//
 // Note: Call All() first to ensure the cache is up-to-date.
 func (e *redisEvents) At(idx int) *session.Event {
 	e.mu.RLock()

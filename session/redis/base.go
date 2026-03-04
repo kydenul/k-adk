@@ -14,17 +14,18 @@ import (
 )
 
 const (
-	DefaultRedisHost           = "127.0.0.1"
-	DefaultRedisPort           = 6379
-	DefaultRedisPassword       = ""
-	DefaultPoolSize            = 100
-	DefaultMaxIdleConns        = 30
-	DefaultMinIdleConns        = 15
-	DefaultConnMaxIdleTime     = 10 * time.Minute
-	DefaultConnMaxLifetime     = 30 * time.Minute
-	DefaultPingRetries         = 3
-	DefaultPingTimeout         = 3 * time.Second
-	DefaultPoolMonitorInterval = 1 * time.Minute
+	defaultRedisHost           = "127.0.0.1"
+	defaultRedisPort           = 6379
+	defaultRedisPassword       = ""
+	defaultPoolSize            = 100
+	defaultMaxIdleConns        = 30
+	defaultMinIdleConns        = 15
+	defaultConnMaxIdleTime     = 10 * time.Minute
+	defaultConnMaxLifetime     = 30 * time.Minute
+	defaultPingRetries         = 3
+	defaultPingTimeout         = 3 * time.Second
+	defaultPoolMonitor         = false
+	defaultPoolMonitorInterval = 1 * time.Minute
 )
 
 // RedisConfig holds Redis connection configuration.
@@ -61,40 +62,29 @@ func (c *RedisConfig) String() string {
 		maskedPassword = "(empty)"
 	}
 
-	return fmt.Sprintf(
-		"RedisConfig ==> Host: %s, Port: %d, Password: %s, PoolSize: %d, "+
-			"MaxIdleConns: %d, MinIdleConns: %d, ConnMaxIdleTime: %s, ConnMaxLifetime: %s, "+
-			"PingRetries: %d, PingTimeout: %s, EnablePoolMonitor: %v, PoolMonitorInterval: %s",
-		c.Host,
-		c.Port,
-		maskedPassword,
-		c.PoolSize,
-		c.MaxIdleConns,
-		c.MinIdleConns,
-		c.ConnMaxIdleTime,
-		c.ConnMaxLifetime,
-		c.PingRetries,
-		c.PingTimeout,
-		c.EnablePoolMonitor,
-		c.PoolMonitorInterval,
-	)
+	return fmt.Sprintf("RedisConfig ==> Host: %s, Port: %d, Password: %s, PoolSize: %d, "+
+		"MaxIdleConns: %d, MinIdleConns: %d, ConnMaxIdleTime: %s, ConnMaxLifetime: %s, "+
+		"PingRetries: %d, PingTimeout: %s, EnablePoolMonitor: %v, PoolMonitorInterval: %s",
+		c.Host, c.Port, maskedPassword, c.PoolSize,
+		c.MaxIdleConns, c.MinIdleConns, c.ConnMaxIdleTime, c.ConnMaxLifetime,
+		c.PingRetries, c.PingTimeout, c.EnablePoolMonitor, c.PoolMonitorInterval)
 }
 
 // DefaultRedisConfig returns a RedisConfig with default values.
 func DefaultRedisConfig() *RedisConfig {
 	return &RedisConfig{
-		Host:                DefaultRedisHost,
-		Port:                DefaultRedisPort,
-		Password:            DefaultRedisPassword,
-		PoolSize:            DefaultPoolSize,
-		MaxIdleConns:        DefaultMaxIdleConns,
-		MinIdleConns:        DefaultMinIdleConns,
-		ConnMaxIdleTime:     DefaultConnMaxIdleTime,
-		ConnMaxLifetime:     DefaultConnMaxLifetime,
-		PingRetries:         DefaultPingRetries,
-		PingTimeout:         DefaultPingTimeout,
-		EnablePoolMonitor:   false,
-		PoolMonitorInterval: DefaultPoolMonitorInterval,
+		Host:                defaultRedisHost,
+		Port:                defaultRedisPort,
+		Password:            defaultRedisPassword,
+		PoolSize:            defaultPoolSize,
+		MaxIdleConns:        defaultMaxIdleConns,
+		MinIdleConns:        defaultMinIdleConns,
+		ConnMaxIdleTime:     defaultConnMaxIdleTime,
+		ConnMaxLifetime:     defaultConnMaxLifetime,
+		PingRetries:         defaultPingRetries,
+		PingTimeout:         defaultPingTimeout,
+		EnablePoolMonitor:   defaultPoolMonitor,
+		PoolMonitorInterval: defaultPoolMonitorInterval,
 		Logger:              nil,
 	}
 }
@@ -102,6 +92,7 @@ func DefaultRedisConfig() *RedisConfig {
 // RedisClient wraps a Redis client with optional pool monitoring.
 type RedisClient struct {
 	redis.UniversalClient
+
 	cancelMonitor context.CancelFunc
 	logger        log.Logger
 }
@@ -131,17 +122,17 @@ func NewRedisClient(cfg *RedisConfig) (*RedisClient, error) {
 	// Apply defaults for zero values
 	pingRetries := cfg.PingRetries
 	if pingRetries <= 0 {
-		pingRetries = DefaultPingRetries
+		pingRetries = defaultPingRetries
 	}
 
 	pingTimeout := cfg.PingTimeout
 	if pingTimeout <= 0 {
-		pingTimeout = DefaultPingTimeout
+		pingTimeout = defaultPingTimeout
 	}
 
 	poolMonitorInterval := cfg.PoolMonitorInterval
 	if poolMonitorInterval <= 0 {
-		poolMonitorInterval = DefaultPoolMonitorInterval
+		poolMonitorInterval = defaultPoolMonitorInterval
 	}
 
 	// Use DiscardLog if no custom logger is provided
@@ -245,13 +236,28 @@ func (c *RedisClient) runPoolMonitor(ctx context.Context, interval time.Duration
 	}
 }
 
-// "RedisProd"
-
 // LoadRedisConfigFromFile loads redis config from file.
 //
 //   - configFile: The path to the configuration file.
+//
 //   - key: The key in the configuration file where the Redis configuration is located.
-//     Recommonded: `Test` / `Pre-Release` / `Production`
+//
+// Example:
+//
+//	   # Redis Config
+//	   Production: # Recommonded: `Test` / `Pre-Release` / `Production`
+//		 host: "127.0.0.1"
+//		 port: 6379
+//		 password: ""
+//		 pool_size: 100
+//		 max_idle_conns: 30
+//		 min_idle_conns:  10
+//		 conn_max_idle_time: "2m"
+//		 conn_max_lifetime: "10m"
+//		 ping_retries: 3
+//		 ping_timeout: "5s"
+//		 enable_pool_monitor: true
+//		 pool_monitor_interval: "30s"
 func LoadRedisConfigFromFile(configFile, key string) *RedisConfig {
 	v := viper.New()
 	v.SetConfigFile(configFile)
