@@ -40,16 +40,16 @@ The server starts on port 8080 by default. Set `PORT` environment variable to ch
 ### 1. Create a Session
 
 ```bash
-curl -X POST http://localhost:8080/apps/gin_agent/users/user1/sessions
+curl -X POST http://localhost:8080/apps/gin_agent/users/kyden/sessions
 ```
 
 Response:
 
 ```json
 {
-  "id": "abc123",
+  "id": "3e5e88a83f731284dae2aaeca9b541e3",
   "appName": "gin_agent",
-  "userId": "user1",
+  "userId": "kyden",
   "lastUpdateTime": 1234567890,
   "events": [],
   "state": {}
@@ -63,8 +63,8 @@ curl -X POST http://localhost:8080/run \
   -H "Content-Type: application/json" \
   -d '{
     "appName": "gin_agent",
-    "userId": "user1",
-    "sessionId": "abc123",
+    "userId": "kyden",
+    "sessionId": "3e5e88a83f731284dae2aaeca9b541e3", 
     "newMessage": {
       "role": "user",
       "parts": [{"text": "What is the weather in Tokyo?"}]
@@ -97,8 +97,8 @@ curl -X POST http://localhost:8080/run_sse \
   -H "Content-Type: application/json" \
   -d '{
     "appName": "gin_agent",
-    "userId": "user1",
-    "sessionId": "58af61bc-1bce-4a77-96ee-f5ac17ad3cbb",
+    "userId": "kyden",
+    "sessionId": "3e5e88a83f731284dae2aaeca9b541e3",
     "newMessage": {
       "role": "user",
       "parts": [{"text": "Tell me about the weather in Paris"}]
@@ -120,7 +120,7 @@ data: {"id":"evt1","time":1234567890,"turnComplete":true,"content":{"parts":[{"t
 ### 4. List Sessions
 
 ```bash
-curl http://localhost:8080/apps/gin_agent/users/user1/sessions
+curl http://localhost:8080/apps/gin_agent/users/kyden/sessions
 ```
 
 ### 5. Get Session Details
