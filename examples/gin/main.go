@@ -155,6 +155,9 @@ func (s *Server) handleRun(c *gin.Context) {
 		events = append(events, models.FromSessionEvent(event))
 	}
 
+	// Persist session to memory for cross-session search
+	s.addSessionToMemory(ctx, req.AppName, req.UserID, req.SessionID)
+
 	c.JSON(http.StatusOK, events)
 }
 
@@ -231,6 +234,31 @@ func (s *Server) handleRunSSE(c *gin.Context) {
 		eventJSON, _ := sonic.Marshal(models.FromSessionEvent(event))
 		_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", eventJSON)
 		c.Writer.Flush()
+	}
+
+	// Persist session to memory for cross-session search
+	s.addSessionToMemory(ctx, req.AppName, req.UserID, req.SessionID)
+}
+
+// addSessionToMemory re-fetches the session (which now includes the latest events)
+// and persists it to the memory service for cross-session search.
+func (s *Server) addSessionToMemory(ctx context.Context, appName, userID, sessionID string) {
+	if s.memoryService == nil {
+		return
+	}
+
+	resp, err := s.sessionService.Get(ctx, &session.GetRequest{
+		AppName:   appName,
+		UserID:    userID,
+		SessionID: sessionID,
+	})
+	if err != nil {
+		Logger.Errorf("failed to get session for memory: %v", err)
+		return
+	}
+
+	if err := s.memoryService.AddSession(ctx, resp.Session); err != nil {
+		Logger.Errorf("failed to add session to memory: %v", err)
 	}
 }
 
@@ -443,7 +471,7 @@ func main() {
 
 	// Create session services
 	// Create PostgreSQL client
-	pgClient, err := pg.NewClient(ctx, &pg.Config{
+	pgClient, err := pg.NewPostgresClient(ctx, &pg.Config{
 		ConnStr:      pgConnStr,
 		MaxOpenConns: 25,
 		MaxIdleConns: 10,
@@ -467,8 +495,10 @@ func main() {
 	}
 
 	// Create Redis session service
-	sessSrv, err := ksess.NewRedisSessionService(rdb, defaultRedisSessionTTL,
-		Logger, ksess.WithPersister(pgPersister))
+	sessSrv, err := ksess.NewRedisSessionService(rdb,
+		ksess.WithTTL(defaultRedisSessionTTL),
+		ksess.WithLogger(Logger),
+		ksess.WithPersister(pgPersister))
 	if err != nil {
 		log.Fatalf("Failed to create session service: %v", err)
 	}

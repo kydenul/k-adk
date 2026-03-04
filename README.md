@@ -224,6 +224,25 @@ results, _ := memorySrv.Search(ctx, &memory.SearchRequest{
 })
 ```
 
+> **⚠️ Important: Memory requires manual persistence**
+>
+> The ADK `runner.Run()` only writes events to `session.Service` — it does **not** call `memory.Service.AddSession()` automatically.
+>
+> **Why:** In ADK's design, Session is the real-time conversation store (managed by the runner), while Memory is a cross-session knowledge layer intended for developer-controlled ingestion. The runner has no knowledge of when or which sessions should be committed to long-term memory.
+>
+> **How to handle:** Call `AddSession` yourself after the runner finishes execution:
+>
+> ```go
+> // After runner.Run() completes, re-fetch the session (now with latest events)
+> // and persist it to memory
+> resp, _ := sessionService.Get(ctx, &session.GetRequest{
+>     AppName: appName, UserID: userID, SessionID: sessionID,
+> })
+> memoryService.AddSession(ctx, resp.Session)
+> ```
+>
+> See `examples/gin/main.go` for a complete working example.
+
 ## Architecture
 
 ```
