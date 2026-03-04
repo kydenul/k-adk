@@ -15,12 +15,15 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/kydenul/k-adk/examples/gin/middleware"
 	"github.com/kydenul/k-adk/examples/gin/models"
+	kmem "github.com/kydenul/k-adk/memory/postgres"
+	pg "github.com/kydenul/k-adk/session/postgres"
 	ksess "github.com/kydenul/k-adk/session/redis"
 	"github.com/kydenul/log"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
+	"google.golang.org/adk/memory"
 	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
@@ -35,6 +38,15 @@ const (
 
 var Logger log.Logger
 
+var pgConnStr = func() string {
+	if connStr := os.Getenv("PG_CONN_STR"); connStr != "" {
+		return connStr
+	}
+
+	// XXX: Local
+	return "postgres://postgres:postgres@localhost:5432/kadk?sslmode=disable"
+}()
+
 // init initializes the global logger by loading configuration from config.yaml.
 // Panics if the configuration file cannot be loaded.
 func init() {
@@ -48,6 +60,7 @@ func init() {
 // Server holds the dependencies for HTTP handlers.
 type Server struct {
 	agentLoader    agent.Loader
+	memoryService  memory.Service
 	sessionService session.Service
 }
 
@@ -56,10 +69,15 @@ type Server struct {
 // ============================================================================
 
 // NewServer creates a new Server with the given agent loader and session service.
-func NewServer(agentLoader agent.Loader, sessionService session.Service) *Server {
+func NewServer(
+	agentLoader agent.Loader,
+	sessSrv session.Service,
+	memSrv memory.Service,
+) *Server {
 	return &Server{
 		agentLoader:    agentLoader,
-		sessionService: sessionService,
+		memoryService:  memSrv,
+		sessionService: sessSrv,
 	}
 }
 
@@ -106,6 +124,7 @@ func (s *Server) handleRun(c *gin.Context) {
 	r, err := runner.New(runner.Config{
 		AppName:        req.AppName,
 		Agent:          curAgent,
+		MemoryService:  s.memoryService,
 		SessionService: s.sessionService,
 	})
 	if err != nil {
@@ -183,6 +202,7 @@ func (s *Server) handleRunSSE(c *gin.Context) {
 		AppName:        req.AppName,
 		Agent:          curAgent,
 		SessionService: s.sessionService,
+		MemoryService:  s.memoryService,
 	})
 	if err != nil {
 		c.JSON(
@@ -422,16 +442,47 @@ func main() {
 	}
 
 	// Create session services
+	// Create PostgreSQL client
+	pgClient, err := pg.NewClient(ctx, &pg.Config{
+		ConnStr:      pgConnStr,
+		MaxOpenConns: 25,
+		MaxIdleConns: 10,
+		ShardCount:   8, // Events are sharded across tables for scalability
+	})
+	if err != nil {
+		log.Fatalf("Failed to create PostgreSQL client: %v", err)
+	}
+
+	// Create session persister (handles async persistence)
+	pgPersister, err := pg.NewSessionPersister(ctx, pgClient)
+	if err != nil {
+		log.Fatalf("Failed to create session persister: %v", err)
+	}
+
+	// Create Redis client
 	rdb, err := ksess.NewRedisClient(ksess.LoadRedisConfigFromFile(
 		filepath.Join(".", "config.yaml"), "Production"))
 	if err != nil {
 		log.Fatalf("Failed to create redis client: %v", err)
 	}
 
-	sessionService, err := ksess.NewRedisSessionService(rdb, defaultRedisSessionTTL, Logger)
+	// Create Redis session service
+	sessSrv, err := ksess.NewRedisSessionService(rdb, defaultRedisSessionTTL,
+		Logger, ksess.WithPersister(pgPersister))
 	if err != nil {
 		log.Fatalf("Failed to create session service: %v", err)
 	}
+
+	// Create Memory Service
+	memSrv, err := kmem.NewPostgresMemoryService(ctx, kmem.PgMemSvrConfig{
+		ConnStr: pgConnStr,
+
+		Logger: Logger,
+	})
+	if err != nil {
+		log.Fatalf("Failed to create memory service: %v", err)
+	}
+
 	// Create LLMAgent
 	a, err := llmagent.New(llmagent.Config{
 		Name:        defaultAppName,
@@ -450,7 +501,7 @@ Always be polite and helpful.`,
 	agentLoader := agent.NewSingleLoader(a)
 
 	// Create server
-	server := NewServer(agentLoader, sessionService)
+	server := NewServer(agentLoader, sessSrv, memSrv)
 
 	// Setup Gin router
 	r := gin.Default()
