@@ -19,28 +19,33 @@ var _ ksess.Persister = (*SessionPersister)(nil)
 
 // Default configuration values.
 const (
-	DefaultAsyncBufferSize = 1000
-	DefaultAsyncOpTimeout  = 30 * time.Second
+	defaultAsyncBufferSize = 1000
+	defaultAsyncOpTimeout  = 30 * time.Second
+
+	operationSession = "session"
+	operationEvent   = "event"
+	operationDelete  = "delete"
 )
 
 // SessionPersister implements Persister for PostgreSQL session persistence.
 // It is designed to work alongside RedisSessionService as a long-term storage backend.
 type SessionPersister struct {
-	client    *Client
+	client *Client
+
 	logger    log.Logger
-	asyncChan chan asyncOp // Channel for async operations
+	asyncChan chan asyncOperation // Channel for async operations
 	wg        sync.WaitGroup
 	closed    bool
 	mu        sync.Mutex
 }
 
-type asyncOp struct {
-	opType    string // "session", "event", "delete"
-	sess      session.Session
-	evt       *session.Event
-	appName   string
-	userID    string
-	sessionID string
+type asyncOperation struct {
+	operationType string // "session", "event", "delete"
+	sess          session.Session
+	evt           *session.Event
+	appName       string
+	userID        string
+	sessionID     string
 }
 
 // PersisterOption configures the SessionPersister.
@@ -51,7 +56,7 @@ type PersisterOption func(*SessionPersister)
 func WithAsyncBufferSize(size int) PersisterOption {
 	return func(p *SessionPersister) {
 		if size > 0 {
-			p.asyncChan = make(chan asyncOp, size)
+			p.asyncChan = make(chan asyncOperation, size)
 		} else {
 			p.asyncChan = nil
 		}
@@ -76,7 +81,7 @@ func NewSessionPersister(
 	p := &SessionPersister{
 		client:    client,
 		logger:    logger,
-		asyncChan: make(chan asyncOp, DefaultAsyncBufferSize),
+		asyncChan: make(chan asyncOperation, defaultAsyncBufferSize),
 	}
 
 	// Apply options
@@ -102,8 +107,8 @@ func NewSessionPersister(
 
 // initSchema creates the necessary tables and indexes.
 func (p *SessionPersister) initSchema(ctx context.Context) error {
-	// Create sessions table
-	sessionsSchema := `
+	// NOTE: Create sessions table
+	const sessionsSchema = `
 		CREATE TABLE IF NOT EXISTS sessions (
 			id VARCHAR(255) NOT NULL,
 			app_name VARCHAR(255) NOT NULL,
@@ -119,12 +124,14 @@ func (p *SessionPersister) initSchema(ctx context.Context) error {
 		CREATE INDEX IF NOT EXISTS idx_sessions_last_update ON sessions(last_update_time);
 	`
 
+	p.logger.Infof("Init Session Schema SQL: %s", sessionsSchema)
+
 	if _, err := p.client.DB().ExecContext(ctx, sessionsSchema); err != nil {
 		p.logger.Errorf("failed to create sessions table: %v", err)
 		return fmt.Errorf("failed to create sessions table: %w", err)
 	}
 
-	// Create sharded events tables
+	// NOTE: Create sharded events tables
 	for i := range p.client.ShardCount() {
 		eventsSchema := fmt.Sprintf(`
 			CREATE TABLE IF NOT EXISTS session_events_%d (
@@ -140,11 +147,11 @@ func (p *SessionPersister) initSchema(ctx context.Context) error {
 				PRIMARY KEY (app_name, user_id, session_id, event_order)
 			);
 
-			CREATE INDEX IF NOT EXISTS idx_events_%d_session
-				ON session_events_%d(app_name, user_id, session_id);
-			CREATE INDEX IF NOT EXISTS idx_events_%d_timestamp
-				ON session_events_%d(timestamp);
+			CREATE INDEX IF NOT EXISTS idx_events_%d_session ON session_events_%d(app_name, user_id, session_id);
+			CREATE INDEX IF NOT EXISTS idx_events_%d_timestamp ON session_events_%d(timestamp);
 		`, i, i, i, i, i)
+
+		log.Infof("Init Event Schema SQL: %s", eventsSchema)
 
 		if _, err := p.client.DB().ExecContext(ctx, eventsSchema); err != nil {
 			p.logger.Errorf("failed to create events shard table %d: %v", i, err)
@@ -167,22 +174,22 @@ func (p *SessionPersister) asyncWorker() {
 }
 
 // processAsyncOp processes a single async operation with proper context management.
-func (p *SessionPersister) processAsyncOp(op asyncOp) {
-	ctx, cancel := context.WithTimeout(context.Background(), DefaultAsyncOpTimeout)
+func (p *SessionPersister) processAsyncOp(op asyncOperation) {
+	ctx, cancel := context.WithTimeout(context.Background(), defaultAsyncOpTimeout)
 	defer cancel()
 
 	var err error
-	switch op.opType {
-	case "session":
+	switch op.operationType {
+	case operationSession:
 		err = p.persistSessionSync(ctx, op.sess)
-	case "event":
+	case operationEvent:
 		err = p.persistEventSync(ctx, op.sess, op.evt)
-	case "delete":
+	case operationDelete:
 		err = p.deleteSessionSync(ctx, op.appName, op.userID, op.sessionID)
 	}
 
 	if err != nil {
-		p.logger.Errorf("async %s operation failed: %v", op.opType, err)
+		p.logger.Errorf("async %s operation failed: %v", op.operationType, err)
 	}
 }
 
@@ -198,12 +205,14 @@ func (p *SessionPersister) PersistSession(ctx context.Context, sess session.Sess
 
 	if p.asyncChan != nil {
 		select {
-		case p.asyncChan <- asyncOp{opType: "session", sess: sess}:
+		case p.asyncChan <- asyncOperation{operationType: operationSession, sess: sess}:
 			return nil
+
 		default:
 			p.logger.Warn("async channel full, falling back to sync persist")
 		}
 	}
+
 	return p.persistSessionSync(ctx, sess)
 }
 
@@ -221,21 +230,24 @@ func (p *SessionPersister) persistSessionSync(ctx context.Context, sess session.
 		stateJSON = []byte("{}")
 	}
 
-	query := `
+	stmt := `
 		INSERT INTO sessions (id, app_name, user_id, state, last_update_time, created_at)
 		VALUES ($1, $2, $3, $4, $5, NOW())
 		ON CONFLICT (app_name, user_id, id) DO UPDATE
 		SET state = EXCLUDED.state, last_update_time = EXCLUDED.last_update_time
 	`
 
-	_, err := p.client.DB().ExecContext(ctx, query,
+	p.logger.Infof("Persist Session SQL: %s", stmt)
+
+	_, err := p.client.DB().ExecContext(ctx, stmt,
 		sess.ID(), sess.AppName(), sess.UserID(), stateJSON, sess.LastUpdateTime())
 	if err != nil {
 		p.logger.Errorf("failed to persist session %s: %v", sess.ID(), err)
 		return fmt.Errorf("failed to persist session: %w", err)
 	}
 
-	p.logger.Debugf("session persisted: %s", sess.ID())
+	p.logger.Infof("session persisted: %s", sess.ID())
+
 	return nil
 }
 
@@ -255,12 +267,14 @@ func (p *SessionPersister) PersistEvent(
 
 	if p.asyncChan != nil {
 		select {
-		case p.asyncChan <- asyncOp{opType: "event", sess: sess, evt: evt}:
+		case p.asyncChan <- asyncOperation{operationType: operationEvent, sess: sess, evt: evt}:
 			return nil
+
 		default:
 			p.logger.Warn("async channel full, falling back to sync persist")
 		}
 	}
+
 	return p.persistEventSync(ctx, sess, evt)
 }
 
@@ -288,6 +302,13 @@ func (p *SessionPersister) persistEventSync(
 
 	// Lock the session row to serialize event inserts for this session
 	lockQuery := `SELECT id FROM sessions WHERE app_name = $1 AND user_id = $2 AND id = $3 FOR UPDATE`
+	p.logger.Debugf(
+		"Lock Session SQL: %s, args: [%s, %s, %s]",
+		lockQuery,
+		sess.AppName(),
+		sess.UserID(),
+		sess.ID(),
+	)
 	var lockedID string
 	_ = tx.QueryRowContext(ctx, lockQuery, sess.AppName(), sess.UserID(), sess.ID()).Scan(&lockedID)
 	// Ignore error - session may not exist yet, but we still need the order
@@ -298,6 +319,13 @@ func (p *SessionPersister) persistEventSync(
 		` WHERE app_name = $1 AND user_id = $2 AND session_id = $3`
 
 	var nextOrder int
+	p.logger.Debugf(
+		"Get Next Order SQL: %s, args: [%s, %s, %s]",
+		orderQuery,
+		sess.AppName(),
+		sess.UserID(),
+		sess.ID(),
+	)
 	err = tx.QueryRowContext(ctx, orderQuery,
 		sess.AppName(), sess.UserID(), sess.ID()).Scan(&nextOrder)
 	if err != nil {
@@ -311,6 +339,17 @@ func (p *SessionPersister) persistEventSync(
 		` (id, app_name, user_id, session_id, event_order, content, author, timestamp, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())`
 
+	p.logger.Debugf(
+		"Insert Event SQL: %s, args: [%s, %s, %s, %s, %d, <content>, %s, %s]",
+		insertQuery,
+		evt.ID,
+		sess.AppName(),
+		sess.UserID(),
+		sess.ID(),
+		nextOrder,
+		evt.Author,
+		evt.Timestamp,
+	)
 	_, err = tx.ExecContext(ctx, insertQuery,
 		evt.ID, sess.AppName(), sess.UserID(), sess.ID(),
 		nextOrder, evtData, evt.Author, evt.Timestamp)
@@ -321,6 +360,8 @@ func (p *SessionPersister) persistEventSync(
 
 	// Also update session's last_update_time
 	updateQuery := `UPDATE sessions SET last_update_time = $1 WHERE app_name = $2 AND user_id = $3 AND id = $4`
+	p.logger.Debugf("Update Session SQL: %s, args: [%s, %s, %s, %s]",
+		updateQuery, evt.Timestamp, sess.AppName(), sess.UserID(), sess.ID())
 	if _, err = tx.ExecContext(ctx, updateQuery,
 		evt.Timestamp, sess.AppName(), sess.UserID(), sess.ID()); err != nil {
 		p.logger.Warnf("failed to update session last_update_time: %v", err)
@@ -352,17 +393,19 @@ func (p *SessionPersister) DeleteSession(
 
 	if p.asyncChan != nil {
 		select {
-		case p.asyncChan <- asyncOp{
-			opType:    "delete",
-			appName:   appName,
-			userID:    userID,
-			sessionID: sessionID,
+		case p.asyncChan <- asyncOperation{
+			operationType: operationDelete,
+			appName:       appName,
+			userID:        userID,
+			sessionID:     sessionID,
 		}:
 			return nil
+
 		default:
 			p.logger.Warn("async channel full, falling back to sync delete")
 		}
 	}
+
 	return p.deleteSessionSync(ctx, appName, userID, sessionID)
 }
 
@@ -380,6 +423,13 @@ func (p *SessionPersister) deleteSessionSync(
 	tableName := p.client.GetEventsTableName(userID)
 	//nolint:gosec // table name is generated internally
 	eventsQuery := `DELETE FROM ` + tableName + ` WHERE app_name = $1 AND user_id = $2 AND session_id = $3`
+	p.logger.Debugf(
+		"Delete Events SQL: %s, args: [%s, %s, %s]",
+		eventsQuery,
+		appName,
+		userID,
+		sessionID,
+	)
 	_, err = tx.ExecContext(ctx, eventsQuery, appName, userID, sessionID)
 	if err != nil {
 		return fmt.Errorf("failed to delete events: %w", err)
@@ -387,6 +437,13 @@ func (p *SessionPersister) deleteSessionSync(
 
 	// Delete session
 	sessionQuery := `DELETE FROM sessions WHERE app_name = $1 AND user_id = $2 AND id = $3`
+	p.logger.Debugf(
+		"Delete Session SQL: %s, args: [%s, %s, %s]",
+		sessionQuery,
+		appName,
+		userID,
+		sessionID,
+	)
 	_, err = tx.ExecContext(ctx, sessionQuery, appName, userID, sessionID)
 	if err != nil {
 		return fmt.Errorf("failed to delete session: %w", err)

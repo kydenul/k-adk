@@ -34,7 +34,7 @@ func setupTestDB(t *testing.T) (*SessionPersister, *Client) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	client, err := NewClient(ctx, &Config{
+	client, err := NewPostgresClient(ctx, &Config{
 		ConnStr:    getTestConnString(),
 		ShardCount: 4,
 	})
@@ -322,7 +322,7 @@ func TestPersistEvent(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	client, err := NewClient(ctx, &Config{
+	client, err := NewPostgresClient(ctx, &Config{
 		ConnStr:    getTestConnString(),
 		ShardCount: 4,
 	})
@@ -545,7 +545,7 @@ func TestAsyncBufferSize(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	client, err := NewClient(ctx, &Config{
+	client, err := NewPostgresClient(ctx, &Config{
 		ConnStr:    getTestConnString(),
 		ShardCount: 4,
 	})
@@ -713,7 +713,7 @@ func TestSchemaCreation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	client, err := NewClient(ctx, &Config{
+	client, err := NewPostgresClient(ctx, &Config{
 		ConnStr:    getTestConnString(),
 		ShardCount: 4,
 	})
