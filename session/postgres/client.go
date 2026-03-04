@@ -15,18 +15,19 @@ import (
 )
 
 const (
-	DefaultConnMaxIdleTime = 10 * time.Minute
-	DefaultConnMaxLifetime = 30 * time.Minute
-	DefaultMaxOpenConns    = 25
-	DefaultMaxIdleConns    = 10
-	DefaultPingRetries     = 3
-	DefaultPingTimeout     = 3 * time.Second
-	DefaultShardCount      = 8
+	defaultConnMaxIdleTime = 10 * time.Minute
+	defaultConnMaxLifetime = 30 * time.Minute
+	defaultMaxOpenConns    = 25
+	defaultMaxIdleConns    = 10
+	defaultPingRetries     = 3
+	defaultPingTimeout     = 3 * time.Second
+	defaultShardCount      = 8
 )
 
 // Config holds PostgreSQL connection configuration for session persistence.
 type Config struct {
-	// ConnStr is the PostgreSQL connection string
+	// ConnStr is the PostgreSQL connection string.
+	//
 	// e.g., "postgres://user:pass@localhost:5432/dbname?sslmode=disable"
 	ConnStr string `mapstructure:"conn_str"`
 
@@ -58,30 +59,22 @@ func (c *Config) String() string {
 
 	return fmt.Sprintf(
 		"PostgresConfig ==> ConnStr: %s, MaxOpenConns: %d, MaxIdleConns: %d, "+
-			"ConnMaxIdleTime: %s, ConnMaxLifetime: %s, PingRetries: %d, "+
-			"PingTimeout: %s, ShardCount: %d",
-		maskedConnStr,
-		c.MaxOpenConns,
-		c.MaxIdleConns,
-		c.ConnMaxIdleTime,
-		c.ConnMaxLifetime,
-		c.PingRetries,
-		c.PingTimeout,
-		c.ShardCount,
-	)
+			"ConnMaxIdleTime: %s, ConnMaxLifetime: %s, PingRetries: %d, PingTimeout: %s, ShardCount: %d",
+		maskedConnStr, c.MaxOpenConns, c.MaxIdleConns, c.ConnMaxIdleTime,
+		c.ConnMaxLifetime, c.PingRetries, c.PingTimeout, c.ShardCount)
 }
 
 // DefaultConfig returns a Config with default values.
 func DefaultConfig() *Config {
 	return &Config{
 		ConnStr:         "",
-		MaxOpenConns:    DefaultMaxOpenConns,
-		MaxIdleConns:    DefaultMaxIdleConns,
-		ConnMaxIdleTime: DefaultConnMaxIdleTime,
-		ConnMaxLifetime: DefaultConnMaxLifetime,
-		PingRetries:     DefaultPingRetries,
-		PingTimeout:     DefaultPingTimeout,
-		ShardCount:      DefaultShardCount,
+		MaxOpenConns:    defaultMaxOpenConns,
+		MaxIdleConns:    defaultMaxIdleConns,
+		ConnMaxIdleTime: defaultConnMaxIdleTime,
+		ConnMaxLifetime: defaultConnMaxLifetime,
+		PingRetries:     defaultPingRetries,
+		PingTimeout:     defaultPingTimeout,
+		ShardCount:      defaultShardCount,
 		Logger:          discardlog.NewDiscardLog(),
 	}
 }
@@ -93,9 +86,9 @@ type Client struct {
 	shardCount int
 }
 
-// NewClient creates a new PostgreSQL client with the given configuration.
+// NewPostgresClient creates a new PostgreSQL client with the given configuration.
 // The caller is responsible for closing the client when done.
-func NewClient(ctx context.Context, cfg *Config) (*Client, error) {
+func NewPostgresClient(ctx context.Context, cfg *Config) (*Client, error) {
 	if cfg == nil {
 		return nil, errors.New("postgres config cannot be nil")
 	}
@@ -107,17 +100,17 @@ func NewClient(ctx context.Context, cfg *Config) (*Client, error) {
 	// Apply defaults for zero values
 	pingRetries := cfg.PingRetries
 	if pingRetries <= 0 {
-		pingRetries = DefaultPingRetries
+		pingRetries = defaultPingRetries
 	}
 
 	pingTimeout := cfg.PingTimeout
 	if pingTimeout <= 0 {
-		pingTimeout = DefaultPingTimeout
+		pingTimeout = defaultPingTimeout
 	}
 
 	shardCount := cfg.ShardCount
 	if shardCount <= 0 {
-		shardCount = DefaultShardCount
+		shardCount = defaultShardCount
 	}
 	// Ensure shard count is power of 2
 	if !isPowerOfTwo(shardCount) {
