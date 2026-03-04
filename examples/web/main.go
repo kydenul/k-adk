@@ -107,7 +107,8 @@ func main() {
 	}
 
 	// Create Redis-backed session service with TTL expiration
-	sessRedisService, err := rsess.NewRedisSessionService(rdb, TTL, logger)
+	sessRedisService, err := rsess.NewRedisSessionService(rdb,
+		rsess.WithTTL(TTL), rsess.WithLogger(logger))
 	if err != nil {
 		log.Fatalf("Failed to create session redis service: %v", sessRedisService)
 	}

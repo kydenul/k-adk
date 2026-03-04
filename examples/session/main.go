@@ -54,7 +54,8 @@ func main() {
 	}
 	defer func() { _ = rdb.Close() }()
 
-	sessSvr, err := rsess.NewRedisSessionService(rdb, 24*time.Hour, logger)
+	sessSvr, err := rsess.NewRedisSessionService(rdb,
+		rsess.WithTTL(24*time.Hour), rsess.WithLogger(logger))
 	if err != nil {
 		log.Fatalf("Failed to create Redis session service: %v", err)
 	}

@@ -137,7 +137,7 @@ func runDemo() {
 		}
 	}()
 
-	pgClient, err := pg.NewClient(ctx, postgresConfig())
+	pgClient, err := pg.NewPostgresClient(ctx, postgresConfig())
 	if err != nil {
 		log.Fatalf("Failed to create postgres client: %v", err)
 	}
@@ -157,7 +157,9 @@ func runDemo() {
 		}
 	}()
 
-	sessService, err := rsess.NewRedisSessionService(rdb, TTL, logger,
+	sessService, err := rsess.NewRedisSessionService(rdb,
+		rsess.WithTTL(TTL),
+		rsess.WithLogger(logger),
 		rsess.WithPersister(pgPersister))
 	if err != nil {
 		log.Fatalf("Failed to create session service: %v", err)
@@ -579,7 +581,7 @@ func runServer() {
 	}
 
 	// Set up PostgreSQL client for persistent session storage
-	pgClient, err := pg.NewClient(ctx, postgresConfig())
+	pgClient, err := pg.NewPostgresClient(ctx, postgresConfig())
 	if err != nil {
 		log.Fatalf("Failed to create postgres client: %v", err)
 	}
@@ -602,12 +604,10 @@ func runServer() {
 
 	// Create Redis-backed session service with PostgreSQL persistence
 	// Sessions are stored in Redis for fast access and automatically synced to PostgreSQL
-	sessService, err := rsess.NewRedisSessionService(
-		rdb,
-		TTL,
-		logger,
-		rsess.WithPersister(pgPersister),
-	)
+	sessService, err := rsess.NewRedisSessionService(rdb,
+		rsess.WithTTL(TTL),
+		rsess.WithLogger(logger),
+		rsess.WithPersister(pgPersister))
 	if err != nil {
 		log.Fatalf("Failed to create session service: %v", err)
 	}
