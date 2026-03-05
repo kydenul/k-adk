@@ -137,8 +137,11 @@ rdb, _ := ksess.NewRedisClient(&ksess.RedisConfig{
     DB:       0,
 })
 
-// Create session service with 24-hour TTL
-sessionSrv, _ := ksess.NewRedisSessionService(rdb, 24*time.Hour, logger)
+// Create session service with 7-day TTL (recommended)
+sessionSrv, _ := ksess.NewRedisSessionService(rdb,
+    ksess.WithTTL(7 * 24 * time.Hour),
+    ksess.WithLogger(logger),
+)
 
 // Use with ADK runner
 runner, _ := runner.New(runner.Config{
@@ -147,6 +150,12 @@ runner, _ := runner.New(runner.Config{
     SessionService: sessionSrv,
 })
 ```
+
+> **⚠️ Important: Redis is the sole read source**
+>
+> All read operations (`Get`, `List`) only query Redis. The optional PostgreSQL persister is **write-only** — it archives session and event data for durability, auditing, or feeding the memory service, but is never used to restore expired sessions.
+>
+> Once a session's Redis TTL expires, it becomes inaccessible through the session service, even if the data still exists in PostgreSQL. **We recommend setting the TTL to at least 7 days** (`7 * 24 * time.Hour`) to keep sessions available for a reasonable window.
 
 ### PostgreSQL Session Persister (Hybrid Storage)
 
@@ -178,8 +187,8 @@ rdb, _ := ksess.NewRedisClient(&ksess.RedisConfig{
 // Create hybrid session service
 sessionSrv, _ := ksess.NewRedisSessionService(
     rdb,
-    10*time.Minute, // Redis TTL
-    logger,
+    ksess.WithTTL(7 * 24 * time.Hour), // Recommended: 7-day Redis TTL
+    ksess.WithLogger(logger),
     ksess.WithPersister(pgPersister), // Enable PostgreSQL persistence
 )
 

@@ -22,7 +22,8 @@ var _ session.Service = (*RedisSessionService)(nil)
 
 const (
 	// defaultSessionTTL is the default session expiration time.
-	defaultSessionTTL = 24 * time.Hour
+	// Recommended: 7 days to keep sessions accessible for a reasonable window.
+	defaultSessionTTL = 7 * 24 * time.Hour
 	// sessionIDByteLength defines the length of the session ID in bytes.
 	sessionIDByteLength = 16
 )
@@ -41,7 +42,7 @@ type RedisSessionService struct {
 	logger log.Logger
 	// Optional. PostgreSQL persister for long-term storage
 	persister ksess.Persister
-	// ttl is the session expiration time (default: 24 hours).
+	// ttl is the session expiration time (default: 7 days).
 	ttl time.Duration
 }
 
@@ -59,12 +60,14 @@ func WithLogger(logger log.Logger) ServiceOption {
 	return func(s *RedisSessionService) { s.logger = logger }
 }
 
+// WithTTL sets the session expiration time.
+// If ttl is <= 0, the default session TTL (7 days) will be used instead.
 func WithTTL(ttl time.Duration) ServiceOption {
 	return func(s *RedisSessionService) { s.ttl = ttl }
 }
 
 // NewRedisSessionService creates a new RedisSessionService.
-// If ttl is <= 0, DefaultSessionTTL (24 hours) will be used.
+// If ttl is <= 0, DefaultSessionTTL (7 days) will be used.
 // If logger is nil, a no-op logger will be used internally.
 // Returns an error if rdb is nil.
 func NewRedisSessionService(
@@ -172,7 +175,7 @@ func (s *RedisSessionService) Create(
 		s.logger.Warnf("failed to set expire for index key %s: %v", indexKey, err)
 	}
 
-	log.Infof("session added to index success: key=%s, session=%s", indexKey, sessionID)
+	s.logger.Infof("session added to index success: key=%s, session=%s", indexKey, sessionID)
 
 	// NOTE: Persist to PostgreSQL if persister is configured
 	if s.persister != nil {
@@ -187,7 +190,16 @@ func (s *RedisSessionService) Create(
 	return &session.CreateResponse{Session: sess}, nil
 }
 
-// Get retrieves a session by ID.
+// Get retrieves a session by ID from Redis only.
+//
+// Design note: Get does NOT fall back to PostgreSQL when the session is missing from Redis.
+// Redis is the sole read source; the PostgreSQL persister (if configured) is write-only and
+// serves as a durable archive for auditing, analytics, or feeding the memory service.
+// Once a session's Redis TTL expires, it becomes inaccessible through this service.
+//
+// Recommended: set the Redis TTL to at least 7 days (e.g., ksess.WithTTL(7 * 24 * time.Hour))
+// to keep sessions available for a reasonable window. Sessions older than the TTL will no longer
+// be retrievable, though their data remains in PostgreSQL if a persister was configured.
 func (s *RedisSessionService) Get(
 	ctx context.Context,
 	req *session.GetRequest,
@@ -306,14 +318,16 @@ func (s *RedisSessionService) List(
 		return nil, fmt.Errorf("failed to batch get sessions: %w", err)
 	}
 
-	// NOTE: Parse results
+	// NOTE: Parse results and collect stale session IDs for cleanup
 	sessions := make([]session.Session, 0, len(sessionIDs))
+	var staleIDs []string
 	for _, sessionID := range sessionIDs {
 		cmd := sessionCmds[sessionID]
 		data, err := cmd.Bytes()
 		if err != nil {
 			if errors.Is(err, redis.Nil) {
-				s.logger.Warnf("session %s not found in redis, skipping", sessionID)
+				s.logger.Warnf("session %s not found in redis, marking for cleanup", sessionID)
+				staleIDs = append(staleIDs, sessionID)
 			} else {
 				s.logger.Warnf("failed to get session %s: %v", sessionID, err)
 			}
@@ -341,6 +355,21 @@ func (s *RedisSessionService) List(
 	}
 
 	s.logger.Infof("listed %d sessions for user %s", len(sessions), req.UserID)
+
+	// NOTE: Clean up stale session IDs from the index set asynchronously.
+	// Uses a Lua script to atomically check whether each session key still exists
+	// before removing it from the index, preventing a race where a concurrent Create()
+	// re-creates a session between our pipeline GET and the cleanup SRem.
+	if len(staleIDs) > 0 {
+		staleIDsCopy := staleIDs
+		appName := req.AppName
+		userID := req.UserID
+		go func() {
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+			s.cleanStaleSessionIDs(cleanupCtx, appName, userID, staleIDsCopy)
+		}()
+	}
 
 	return &session.ListResponse{Sessions: sessions}, nil
 }
@@ -452,6 +481,12 @@ func (s *RedisSessionService) AppendEvent(
 
 	s.logger.Debugf("session updated in redis: key=%s", key)
 
+	// NOTE: Refresh index key TTL to keep it aligned with active sessions
+	indexKey := buildSessionIndexKey(sess.AppName(), sess.UserID())
+	if err := s.rdb.Expire(ctx, indexKey, s.ttl).Err(); err != nil {
+		s.logger.Warnf("failed to refresh expire for index key %s: %v", indexKey, err)
+	}
+
 	// NOTE: Real-time sync to PostgreSQL if persister is configured
 	if s.persister != nil {
 		if err := s.persister.PersistEvent(ctx, sess, evt); err != nil {
@@ -465,4 +500,49 @@ func (s *RedisSessionService) AppendEvent(
 	s.logger.Infof("event appended: session=%s, event=%s", sess.ID(), evt.ID)
 
 	return nil
+}
+
+// cleanStaleSessionIDs atomically removes session IDs from the index set only if
+// their corresponding session keys no longer exist in Redis. This prevents a race
+// condition where a concurrent Create() re-creates a session between the pipeline
+// GET (returning redis.Nil) and the cleanup removal.
+var cleanStaleScript = redis.NewScript(`
+local indexKey = KEYS[1]
+local prefix = ARGV[1]
+local removed = 0
+for i = 2, #ARGV do
+    local sessionKey = prefix .. ARGV[i]
+    if redis.call('EXISTS', sessionKey) == 0 then
+        redis.call('SREM', indexKey, ARGV[i])
+        removed = removed + 1
+    end
+end
+return removed
+`)
+
+func (s *RedisSessionService) cleanStaleSessionIDs(
+	ctx context.Context,
+	appName, userID string,
+	staleIDs []string,
+) {
+	indexKey := buildSessionIndexKey(appName, userID)
+	// Session keys are "session:{appName}:{userID}:{sessionID}", so the prefix
+	// up to (and including) the last colon lets the Lua script reconstruct each key.
+	keyPrefix := fmt.Sprintf("session:%s:%s:", appName, userID)
+
+	args := make([]any, 0, len(staleIDs)+1)
+	args = append(args, keyPrefix)
+	for _, id := range staleIDs {
+		args = append(args, id)
+	}
+
+	result, err := cleanStaleScript.Run(ctx, s.rdb, []string{indexKey}, args...).Int()
+	if err != nil {
+		s.logger.Warnf("failed to clean up stale session IDs from index: %v", err)
+		return
+	}
+
+	if result > 0 {
+		s.logger.Infof("cleaned up %d stale session IDs from index", result)
+	}
 }
