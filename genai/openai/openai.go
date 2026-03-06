@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"net/http"
 	"sync"
 
 	discardlog "github.com/kydenul/k-adk/internal/discard_log"
@@ -40,6 +41,12 @@ type Model struct {
 	toolCall    map[string]string
 }
 
+// HTTPOptions holds HTTP-level configuration for the OpenAI client.
+type HTTPOptions struct {
+	// Headers to add to every request.
+	Headers http.Header
+}
+
 // Config is the configuration for creating an OpenAI model.
 type Config struct {
 	// ModelName specifies which model to use (e.g., "gpt-4o", "qwen3:8b").
@@ -57,6 +64,9 @@ type Config struct {
 	//	First -> `OPENAI_API_BASE` environment variable
 	//	Secoed -> `https://api.openai.com/v1/`
 	BaseURL string
+
+	// Optional. HTTPOptions for custom HTTP headers.
+	HTTPOptions HTTPOptions
 
 	// Optional. Logger for logging. Falls back to `DiscardLog` if nil.
 	Logger log.Logger
@@ -76,6 +86,12 @@ func New(config Config) *Model {
 
 	if config.BaseURL != "" {
 		opts = append(opts, option.WithBaseURL(config.BaseURL))
+	}
+
+	for key, values := range config.HTTPOptions.Headers {
+		for _, value := range values {
+			opts = append(opts, option.WithHeaderAdd(key, value))
+		}
 	}
 
 	// Create a new OpenAI client
@@ -249,14 +265,14 @@ func (m *Model) denormalizeToolCallID(shortID string) string {
 }
 
 // convertContentToMessages converts a genai.Content into OpenAI message format.
-// Handles text, images, function calls, and function responses.
+// Handles text, media (images, audio, files), function calls, and function responses.
 func (m *Model) convertContentToMessages(
 	content *genai.Content,
 ) ([]openai.ChatCompletionMessageParamUnion, error) {
 	var messages []openai.ChatCompletionMessageParamUnion
 	var textParts []string
 	var toolCalls []openai.ChatCompletionMessageToolCallUnionParam
-	var imageParts []openai.ChatCompletionContentPartImageParam
+	var mediaParts []openai.ChatCompletionContentPartUnionParam
 
 	for _, part := range content.Parts {
 		switch {
@@ -290,15 +306,17 @@ func (m *Model) convertContentToMessages(
 			textParts = append(textParts, part.Text)
 
 		case part.InlineData != nil:
-			if img := convertInlineDataToImage(part.InlineData); img != nil {
-				imageParts = append(imageParts, *img)
+			mp, err := convertInlineDataToPart(part.InlineData)
+			if err != nil {
+				return nil, fmt.Errorf("failed to convert inline data: %w", err)
 			}
+			mediaParts = append(mediaParts, *mp)
 		}
 	}
 
 	// Build role-specific message if there's content
-	if len(textParts) > 0 || len(imageParts) > 0 || len(toolCalls) > 0 {
-		msg := buildRoleMessage(content.Role, textParts, imageParts, toolCalls)
+	if len(textParts) > 0 || len(mediaParts) > 0 || len(toolCalls) > 0 {
+		msg := buildRoleMessage(content.Role, textParts, mediaParts, toolCalls)
 		if msg != nil {
 			messages = append(messages, *msg)
 		}
@@ -311,12 +329,12 @@ func (m *Model) convertContentToMessages(
 func buildRoleMessage(
 	role string,
 	texts []string,
-	images []openai.ChatCompletionContentPartImageParam,
+	media []openai.ChatCompletionContentPartUnionParam,
 	toolCalls []openai.ChatCompletionMessageToolCallUnionParam,
 ) *openai.ChatCompletionMessageParamUnion {
 	switch convertRole(role) {
 	case "user":
-		return buildUserMessage(texts, images)
+		return buildUserMessage(texts, media)
 	case "assistant":
 		return buildAssistantMessage(texts, toolCalls)
 	case "system":

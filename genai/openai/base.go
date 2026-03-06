@@ -12,28 +12,22 @@ import (
 	"google.golang.org/genai"
 )
 
-// buildUserMessage creates a user message, with multi-part support for images.
+// buildUserMessage creates a user message, with multi-part support for media (images, audio, files).
 func buildUserMessage(
 	texts []string,
-	images []openai.ChatCompletionContentPartImageParam,
+	media []openai.ChatCompletionContentPartUnionParam,
 ) *openai.ChatCompletionMessageParamUnion {
-	if len(images) == 0 {
+	if len(media) == 0 {
 		msg := openai.UserMessage(joinTexts(texts))
 		return &msg
 	}
 
-	// Multi-part message with images
+	// Multi-part message with media
 	var parts []openai.ChatCompletionContentPartUnionParam
 	for _, text := range texts {
-		parts = append(parts, openai.ChatCompletionContentPartUnionParam{
-			OfText: &openai.ChatCompletionContentPartTextParam{Text: text},
-		})
+		parts = append(parts, openai.TextContentPart(text))
 	}
-	for _, img := range images {
-		parts = append(parts, openai.ChatCompletionContentPartUnionParam{
-			OfImageURL: &img,
-		})
-	}
+	parts = append(parts, media...)
 
 	return &openai.ChatCompletionMessageParamUnion{
 		OfUser: &openai.ChatCompletionUserMessageParam{
@@ -164,29 +158,55 @@ func convertSchema(schema *genai.Schema) (map[string]any, error) {
 	return result, nil
 }
 
-// convertInlineDataToImage converts inline image data to OpenAI format.
-func convertInlineDataToImage(data *genai.Blob) *openai.ChatCompletionContentPartImageParam {
-	supportedTypes := map[string]bool{
-		"image/jpg":  true,
-		"image/jpeg": true,
-		"image/png":  true,
-		"image/gif":  true,
-		"image/webp": true,
-	}
+// convertInlineDataToPart converts inline data to the appropriate OpenAI content part.
+// Supports images (jpeg, jpg, png, gif, webp), audio (wav, mp3), and files (pdf, text/*).
+func convertInlineDataToPart(
+	data *genai.Blob,
+) (*openai.ChatCompletionContentPartUnionParam, error) {
+	mime := data.MIMEType
+	b64 := base64.StdEncoding.EncodeToString(data.Data)
 
-	if !supportedTypes[data.MIMEType] {
-		return nil
-	}
+	switch {
+	// Images
+	case mime == "image/jpg" || mime == "image/jpeg" || mime == "image/png" ||
+		mime == "image/gif" || mime == "image/webp":
+		return &openai.ChatCompletionContentPartUnionParam{
+			OfImageURL: &openai.ChatCompletionContentPartImageParam{
+				ImageURL: openai.ChatCompletionContentPartImageImageURLParam{
+					URL:    fmt.Sprintf("data:%s;base64,%s", mime, b64),
+					Detail: "auto",
+				},
+			},
+		}, nil
 
-	return &openai.ChatCompletionContentPartImageParam{
-		ImageURL: openai.ChatCompletionContentPartImageImageURLParam{
-			URL: fmt.Sprintf(
-				"data:%s;base64,%s",
-				data.MIMEType,
-				base64.StdEncoding.EncodeToString(data.Data),
-			),
-			Detail: "auto",
-		},
+	// Audio
+	case mime == "audio/wav" || mime == "audio/mp3" || mime == "audio/mpeg" || mime == "audio/webm":
+		format := "wav"
+		if mime == "audio/mp3" || mime == "audio/mpeg" {
+			format = "mp3"
+		}
+		return &openai.ChatCompletionContentPartUnionParam{
+			OfInputAudio: &openai.ChatCompletionContentPartInputAudioParam{
+				InputAudio: openai.ChatCompletionContentPartInputAudioInputAudioParam{
+					Data:   b64,
+					Format: format,
+				},
+			},
+		}, nil
+
+	// PDF and text files
+	case mime == "application/pdf" || strings.HasPrefix(mime, "text/"):
+		return &openai.ChatCompletionContentPartUnionParam{
+			OfFile: &openai.ChatCompletionContentPartFileParam{
+				File: openai.ChatCompletionContentPartFileFileParam{
+					FileData: openai.Opt(fmt.Sprintf("data:%s;base64,%s", mime, b64)),
+					Filename: openai.Opt("file"),
+				},
+			},
+		}, nil
+
+	default:
+		return nil, fmt.Errorf("unsupported MIME type: %s", mime)
 	}
 }
 
