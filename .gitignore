@@ -57,3 +57,5 @@ debug.out
 # Temporary files
 *.tmp
 *.temp
+
+third/

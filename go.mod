@@ -3,6 +3,7 @@ module github.com/kydenul/k-adk
 go 1.26
 
 require (
+	charm.land/catwalk v0.28.1
 	github.com/anthropics/anthropic-sdk-go v1.26.0
 	github.com/bytedance/sonic v1.15.0
 	github.com/gin-gonic/gin v1.12.0
@@ -28,6 +29,7 @@ require (
 	github.com/bytedance/sonic/loader v0.5.0 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
+	github.com/charmbracelet/x/etag v0.2.0 // indirect
 	github.com/cloudwego/base64x v0.1.6 // indirect
 	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
