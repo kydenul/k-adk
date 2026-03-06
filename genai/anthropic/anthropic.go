@@ -3,13 +3,15 @@ package anthropic
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"iter"
+	"net/http"
+	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
+	"github.com/bytedance/sonic"
 	discardlog "github.com/kydenul/k-adk/internal/discard_log"
 	"github.com/kydenul/log"
 	"github.com/spf13/cast"
@@ -28,12 +30,20 @@ var (
 type Model struct {
 	log.Logger
 
-	client    *anthropic.Client
-	modelName string
+	client               *anthropic.Client
+	modelName            string
+	maxOutputTokens      int64
+	thinkingBudgetTokens int64
+}
+
+// HTTPOptions holds HTTP-level configuration for the Anthropic client.
+type HTTPOptions struct {
+	// Headers to add to every request.
+	Headers http.Header
 }
 
 type Config struct {
-	// ModelName specifies which model to use (e.g., "gpt-4o", "qwen3:8b").
+	// ModelName specifies which model to use (e.g., "claude-sonnet-4-20250514").
 	ModelName string
 
 	// Optional. APIKey for authentication.
@@ -43,6 +53,17 @@ type Config struct {
 
 	// Optional. BaseURL for the custom API endpoint.
 	BaseURL string
+
+	// Optional. HTTPOptions for custom HTTP headers.
+	HTTPOptions HTTPOptions
+
+	// Optional. MaxOutputTokens is the default cap for output tokens.
+	// If zero, falls back to 4096.
+	MaxOutputTokens int64
+
+	// Optional. ThinkingBudgetTokens enables extended thinking with the given budget.
+	// If zero, extended thinking is not enabled.
+	ThinkingBudgetTokens int64
 
 	// Optional. Logger for logging. Falls back to `DiscardLog` if nil.
 	Logger log.Logger
@@ -64,6 +85,12 @@ func New(config Config) *Model {
 		opts = append(opts, option.WithBaseURL(config.BaseURL))
 	}
 
+	for key, values := range config.HTTPOptions.Headers {
+		for _, value := range values {
+			opts = append(opts, option.WithHeaderAdd(key, value))
+		}
+	}
+
 	// Create a new Anthropic client
 	client := anthropic.NewClient(opts...)
 
@@ -71,9 +98,11 @@ func New(config Config) *Model {
 		config.ModelName, config.BaseURL)
 
 	return &Model{
-		Logger:    config.Logger,
-		client:    &client,
-		modelName: config.ModelName,
+		Logger:               config.Logger,
+		client:               &client,
+		modelName:            config.ModelName,
+		maxOutputTokens:      config.MaxOutputTokens,
+		thinkingBudgetTokens: config.ThinkingBudgetTokens,
 	}
 }
 
@@ -216,14 +245,22 @@ func (m *Model) buildMessageParams(req *model.LLMRequest) (anthropic.MessageNewP
 	m.Debugf("building message parameters")
 
 	// Default max tokens (required by Anthropic API)
-	maxTokens := int64(4096)
+	var maxTokens int64 = 4096
+	if m.maxOutputTokens > 0 {
+		maxTokens = m.maxOutputTokens
+	}
 	if req.Config != nil && req.Config.MaxOutputTokens > 0 {
-		maxTokens = int64(req.Config.MaxOutputTokens)
+		maxTokens = cast.ToInt64(req.Config.MaxOutputTokens)
 	}
 
 	params := anthropic.MessageNewParams{
 		Model:     anthropic.Model(m.modelName),
 		MaxTokens: maxTokens,
+	}
+
+	// Apply thinking config
+	if m.thinkingBudgetTokens > 0 {
+		params.Thinking = anthropic.ThinkingConfigParamOfEnabled(m.thinkingBudgetTokens)
 	}
 
 	// Add system instruction if present
@@ -296,9 +333,11 @@ func convertContentToMessage(content *genai.Content) (*anthropic.MessageParam, e
 
 		if part.InlineData != nil {
 			mediaType := part.InlineData.MIMEType
-			switch mediaType {
-			case "image/jpg", "image/jpeg", "image/png", "image/gif", "image/webp":
-				base64Data := base64.StdEncoding.EncodeToString(part.InlineData.Data)
+			base64Data := base64.StdEncoding.EncodeToString(part.InlineData.Data)
+
+			switch {
+			case mediaType == "image/jpg" || mediaType == "image/jpeg" || mediaType == "image/png" ||
+				mediaType == "image/gif" || mediaType == "image/webp":
 				blocks = append(blocks, anthropic.ContentBlockParamUnion{
 					OfImage: &anthropic.ImageBlockParam{
 						Source: anthropic.ImageBlockParamSourceUnion{
@@ -309,6 +348,21 @@ func convertContentToMessage(content *genai.Content) (*anthropic.MessageParam, e
 						},
 					},
 				})
+
+			case mediaType == "application/pdf":
+				blocks = append(blocks, anthropic.NewDocumentBlock(
+					anthropic.Base64PDFSourceParam{
+						Data: base64Data,
+					}))
+
+			case strings.HasPrefix(mediaType, "text/"):
+				blocks = append(blocks, anthropic.NewDocumentBlock(
+					anthropic.PlainTextSourceParam{
+						Data: string(part.InlineData.Data),
+					}))
+
+			default:
+				return nil, fmt.Errorf("unsupported MIME type: %s", mediaType)
 			}
 		}
 
@@ -323,7 +377,7 @@ func convertContentToMessage(content *genai.Content) (*anthropic.MessageParam, e
 		}
 
 		if part.FunctionResponse != nil {
-			responseJSON, err := json.Marshal(part.FunctionResponse.Response)
+			responseJSON, err := sonic.Marshal(part.FunctionResponse.Response)
 			if err != nil {
 				return nil, fmt.Errorf("failed to marshal function response: %w", err)
 			}
@@ -405,13 +459,20 @@ func convertTools(genaiTools []*genai.Tool) []anthropic.ToolUnionParam {
 			// Type is required by Anthropic API, must be "object"
 			inputSchema.Type = "object"
 			if params != nil {
-				if m, ok := params.(map[string]any); ok {
+				m, ok := params.(map[string]any)
+				if !ok {
+					// JSON round-trip for non-map types (e.g., *jsonschema.Schema)
+					jsonBytes, err := sonic.Marshal(params)
+					if err == nil {
+						_ = sonic.Unmarshal(jsonBytes, &m)
+					}
+				}
+
+				if m != nil {
 					if props, ok := m["properties"]; ok {
 						inputSchema.Properties = props
 					}
-					if req, ok := m["required"].([]string); ok {
-						inputSchema.Required = req
-					}
+					inputSchema.Required = toStringSlice(m["required"])
 				}
 			}
 
@@ -426,4 +487,27 @@ func convertTools(genaiTools []*genai.Tool) []anthropic.ToolUnionParam {
 	}
 
 	return tools
+}
+
+// toStringSlice converts a value to []string, handling both []string and []interface{} (from JSON unmarshal).
+func toStringSlice(v any) []string {
+	if v == nil {
+		return nil
+	}
+
+	if ss, ok := v.([]string); ok {
+		return ss
+	}
+
+	if ifaces, ok := v.([]any); ok {
+		result := make([]string, 0, len(ifaces))
+		for _, item := range ifaces {
+			if s, ok := item.(string); ok {
+				result = append(result, s)
+			}
+		}
+		return result
+	}
+
+	return nil
 }
